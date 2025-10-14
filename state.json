@@ -59,8 +59,8 @@
       "considered": true,
       "required_single_female": 5,
       "ratio_threshold": 0.4,
-      "stage": "initial",
-      "last_notified_at": 1760457653
+      "stage": "bonus",
+      "last_notified_at": 1760459657
     },
     "5": {
       "male": 7,
@@ -164,8 +164,8 @@
       "considered": true,
       "required_single_female": 5,
       "ratio_threshold": 0.4,
-      "stage": "initial",
-      "last_notified_at": 1760457653
+      "stage": "bonus",
+      "last_notified_at": 1760459657
     },
     "12": {
       "male": 18,
@@ -179,8 +179,8 @@
       "considered": true,
       "required_single_female": 3,
       "ratio_threshold": 0.4,
-      "stage": "initial",
-      "last_notified_at": 1760457653
+      "stage": "bonus",
+      "last_notified_at": 1760459657
     },
     "13": {
       "male": 0,
