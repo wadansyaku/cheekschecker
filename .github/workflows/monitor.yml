@@ -19,6 +19,18 @@ jobs:
       - run: |
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
+      - name: Debug: test Slack webhook (manual runs only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "SLACK_WEBHOOK_URL is empty (secret not set?)"; exit 1
+          fi
+          curl -s -X POST -H 'Content-type: application/json' \
+            --data '{"text":"Cheekschecker: Webhook connectivity OK ✅"}' \
+            "${SLACK_WEBHOOK_URL}" >/dev/null
+          echo "Slack webhook test sent."
       - name: Watch
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
