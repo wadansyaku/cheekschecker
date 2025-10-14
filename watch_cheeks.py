@@ -473,6 +473,9 @@ async def run() -> int:
         return 1
 
     stats = evaluate_conditions(parse_day_entries(html, settings), settings)
+    print("[DEBUG] parsed first days:",
+      [f"{s['day']}日: 男{s['male']} 女{s['female']} 全{s['total']} ({int(s['ratio']*100)}%)"
+       for s in stats[:10]])
     LOGGER.info("Parsed %d day entries.", len(stats))
     LOGGER.debug("Stats preview: %s", stats[:10])
 
