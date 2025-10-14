@@ -13,7 +13,9 @@
       "dow_en": "Wed",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "2": {
       "male": 5,
@@ -26,7 +28,9 @@
       "dow_en": "Thu",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "3": {
       "male": 7,
@@ -39,7 +43,9 @@
       "dow_en": "Fri",
       "considered": true,
       "required_single_female": 5,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "4": {
       "male": 20,
@@ -52,7 +58,9 @@
       "dow_en": "Sat",
       "considered": true,
       "required_single_female": 5,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "initial",
+      "last_notified_at": 1760457653
     },
     "5": {
       "male": 7,
@@ -65,7 +73,9 @@
       "dow_en": "Sun",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "initial",
+      "last_notified_at": 1760457653
     },
     "6": {
       "male": 0,
@@ -78,7 +88,9 @@
       "dow_en": "Mon",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "7": {
       "male": 13,
@@ -91,7 +103,9 @@
       "dow_en": "Tue",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "initial",
+      "last_notified_at": 1760457653
     },
     "8": {
       "male": 8,
@@ -104,7 +118,9 @@
       "dow_en": "Wed",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "9": {
       "male": 7,
@@ -117,7 +133,9 @@
       "dow_en": "Thu",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "10": {
       "male": 15,
@@ -130,7 +148,9 @@
       "dow_en": "Fri",
       "considered": true,
       "required_single_female": 5,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "initial",
+      "last_notified_at": 1760457653
     },
     "11": {
       "male": 24,
@@ -143,7 +163,9 @@
       "dow_en": "Sat",
       "considered": true,
       "required_single_female": 5,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "initial",
+      "last_notified_at": 1760457653
     },
     "12": {
       "male": 18,
@@ -156,7 +178,9 @@
       "dow_en": "Sun",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "initial",
+      "last_notified_at": 1760457653
     },
     "13": {
       "male": 0,
@@ -169,7 +193,9 @@
       "dow_en": "Mon",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "14": {
       "male": 6,
@@ -182,7 +208,9 @@
       "dow_en": "Tue",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "15": {
       "male": 0,
@@ -195,7 +223,9 @@
       "dow_en": "Wed",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "16": {
       "male": 1,
@@ -208,7 +238,9 @@
       "dow_en": "Thu",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "17": {
       "male": 1,
@@ -221,7 +253,9 @@
       "dow_en": "Fri",
       "considered": true,
       "required_single_female": 5,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "18": {
       "male": 0,
@@ -234,7 +268,9 @@
       "dow_en": "Sat",
       "considered": true,
       "required_single_female": 5,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "19": {
       "male": 0,
@@ -247,7 +283,9 @@
       "dow_en": "Sun",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "20": {
       "male": 0,
@@ -260,7 +298,9 @@
       "dow_en": "Mon",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "21": {
       "male": 0,
@@ -273,7 +313,9 @@
       "dow_en": "Tue",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "22": {
       "male": 0,
@@ -286,7 +328,9 @@
       "dow_en": "Wed",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "23": {
       "male": 0,
@@ -299,7 +343,9 @@
       "dow_en": "Thu",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "24": {
       "male": 0,
@@ -312,7 +358,9 @@
       "dow_en": "Fri",
       "considered": true,
       "required_single_female": 5,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "25": {
       "male": 0,
@@ -325,7 +373,9 @@
       "dow_en": "Sat",
       "considered": true,
       "required_single_female": 5,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "26": {
       "male": 0,
@@ -338,7 +388,9 @@
       "dow_en": "Sun",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "27": {
       "male": 0,
@@ -351,7 +403,9 @@
       "dow_en": "Mon",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "28": {
       "male": 0,
@@ -364,7 +418,9 @@
       "dow_en": "Tue",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "29": {
       "male": 1,
@@ -377,7 +433,9 @@
       "dow_en": "Wed",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "30": {
       "male": 0,
@@ -390,7 +448,9 @@
       "dow_en": "Thu",
       "considered": true,
       "required_single_female": 3,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     },
     "31": {
       "male": 0,
@@ -403,7 +463,9 @@
       "dow_en": "Fri",
       "considered": true,
       "required_single_female": 5,
-      "ratio_threshold": 0.4
+      "ratio_threshold": 0.4,
+      "stage": "none",
+      "last_notified_at": null
     }
   }
 }
