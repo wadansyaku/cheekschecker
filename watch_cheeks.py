@@ -121,6 +121,9 @@ async def run():
             time.sleep(delay); delay = delay * 2 + 1
 
     stats = parse_day_entries(html)
+    # --- debug print: first 10 days summary ---
+    print("[DEBUG] parsed first days:",
+          [f"{s['day']}日: 男{s['male']} 女{s['female']} 全{s['total']} ({int(s['ratio']*100)}%)" for s in stats[:10]])
     changed, newly_meets = diff_changes(state.get("days", {}), stats)
 
     new_days = {str(s["day"]): {"male": s["male"], "female": s["female"], "total": s["total"],
