@@ -1,12 +1,15 @@
-name: Monitor calendar
+name: Monthly summary
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '45 0 1 * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
-  group: monitor-calendar
+  group: summary-monthly
   cancel-in-progress: false
 
 env:
@@ -22,7 +25,7 @@ env:
   UA_CONTACT: 'mailto:example@example.com'
 
 jobs:
-  monitor:
+  summary:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -42,30 +45,26 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Run monitor (scheduled)
-        if: github.event_name != 'workflow_dispatch'
+      - name: Run monthly summary
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python watch_cheeks.py monitor
+        run: python watch_cheeks.py summary --days 30 --raw-output monthly_summary_raw.json
 
-      - name: Run monitor with sanitized artifact
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python watch_cheeks.py monitor --sanitized-output fetched_table_sanitized.html
-
-      - name: Upload sanitized table
-        if: github.event_name == 'workflow_dispatch'
+      - name: Upload raw monthly summary
         uses: actions/upload-artifact@v4
         with:
-          name: sanitized-table
-          path: fetched_table_sanitized.html
+          name: monthly-summary-raw
+          path: monthly_summary_raw.json
           retention-days: 7
 
-      - name: Upload masked history snapshot
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: masked-history
-          path: history_masked.json
-          retention-days: 7
+      - name: Commit masked history
+        run: |
+          if git diff --quiet --exit-code history_masked.json; then
+            echo "No masked history changes to commit"
+          else
+            git config user.email "github-actions@github.com"
+            git config user.name "github-actions"
+            git add history_masked.json
+            git commit -m "chore: update masked history (monthly summary)"
+            git push
+          fi
