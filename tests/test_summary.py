@@ -1,89 +1,69 @@
 import json
-import sys
-from dataclasses import asdict
 from datetime import date, timedelta
 from pathlib import Path
 
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
-from watch_cheeks import (  # noqa: E402
-    DEFAULT_ROLLOVER_HOURS,
-    DailyEntry,
-    Settings,
-    generate_summary_payload,
-    select_summary_bundle,
-    update_masked_history,
+from summarize import (
+    RawDataset,
+    build_masked_summary,
+    build_summary_context,
+    build_slack_payload,
+    load_raw_dataset,
 )
 
 
-def make_settings(**overrides):
-    base = Settings(
-        target_url="http://example.com",
-        slack_webhook_url=None,
-        female_min=3,
-        female_ratio_min=0.3,
-        min_total=None,
-        exclude_keywords=(),
-        include_dow=(),
-        notify_mode="newly",
-        debug_summary=False,
-        ping_channel=False,
-        cooldown_minutes=180,
-        bonus_single_delta=2,
-        bonus_ratio_threshold=0.5,
-        ignore_older_than=1,
-        notify_from_today=1,
-        rollover_hours=dict(DEFAULT_ROLLOVER_HOURS),
-        mask_level=1,
-        robots_enforce=False,
-        ua_contact=None,
-    )
-    if overrides:
-        data = asdict(base)
-        data.update(overrides)
-        return Settings(**data)
-    return base
-
-
-def make_entry(business_day: date, single: int, female: int, male: int) -> DailyEntry:
+def make_raw_entry(day: date, single: int, female: int, male: int) -> dict:
     total = female + male
-    ratio = round(female / total, 3) if total else 0.0
-    dow = "Fri" if business_day.weekday() == 4 else "Mon"
-    return DailyEntry(
-        raw_date=business_day,
-        business_day=business_day,
-        day_of_month=business_day.day,
-        dow_en=dow,
-        male=male,
-        female=female,
-        single_female=single,
-        total=total,
-        ratio=ratio,
-        considered=True,
-        meets=True,
-        required_single=5 if dow in {"Fri", "Sat"} else 3,
-    )
+    ratio = female / total if total else 0
+    return {
+        "date": day.isoformat(),
+        "single_female": single,
+        "female": female,
+        "male": male,
+        "total": total,
+        "ratio": ratio,
+    }
 
 
-def test_generate_summary_payload_and_masking(monkeypatch, tmp_path):
-    logical_today = date(2024, 1, 15)
-    entries = [
-        make_entry(logical_today - timedelta(days=offset), single=3 + (offset % 2), female=4 + offset, male=2)
-        for offset in range(7)
+def test_load_and_build_summary(tmp_path: Path) -> None:
+    start_day = date(2024, 1, 8)
+    days = [
+        make_raw_entry(start_day + timedelta(days=i), single=3 + (i % 2), female=8 + i, male=4)
+        for i in range(7)
     ]
-    settings = make_settings(mask_level=1)
+    prev_days = [
+        make_raw_entry(start_day - timedelta(days=7 - i), single=2 + (i % 2), female=6 + i, male=5)
+        for i in range(7)
+    ]
+    raw_payload = {
+        "period_label": "latest 7 days",
+        "days": days,
+        "previous_days": prev_days,
+    }
+    raw_path = tmp_path / "weekly_raw.json"
+    raw_path.write_text(json.dumps(raw_payload), encoding="utf-8")
 
-    bundle = select_summary_bundle(entries, logical_today=logical_today, days=7)
-    payload = generate_summary_payload(bundle, logical_today=logical_today, settings=settings)
-    assert payload is not None
-    assert "平均" in payload["text"]
-    assert "Hot 日 Top3" in payload["text"]
+    dataset = load_raw_dataset(raw_path)
+    context = build_summary_context("weekly", dataset)
+    assert context is not None
+    assert context.day_count == 7
+    assert context.top_days[0].single_female >= context.top_days[-1].single_female
 
-    history_path = tmp_path / "history.json"
-    monkeypatch.setattr("watch_cheeks.HISTORY_MASKED_PATH", history_path)
-    update_masked_history(entries, settings=settings)
-    data = json.loads(history_path.read_text(encoding="utf-8"))
+    masked = build_masked_summary(context, history_meta={"mask_level": 1})
+    assert masked["status"] == "ok"
+    assert masked["stats"]["single"]["average"] in {"3-4", "5-6", "7-8"}
+    assert masked["top_days"][0]["ratio"] in {"40±", "50±", "60±", "70±", "80+%"}
+    assert "月" in masked["weekday_profile"] or "火" in masked["weekday_profile"]
 
-    assert "days" in data and len(data["days"]) == len(entries)
-    sample_mask = next(iter(data["days"].values()))
-    assert sample_mask["single"] in {"1", "2", "3-4", "5-6", "7-8", "9+"}
+    payload, fallback = build_slack_payload(context, "週次サマリー")
+    assert "blocks" in payload and payload["blocks"]
+    assert "Hot day Top3" in payload["blocks"][3]["text"]["text"]
+    assert "Cheekschecker 週次サマリー" in fallback
+
+
+def test_build_summary_context_no_data() -> None:
+    dataset = RawDataset(period_label="", current=[], previous=[])
+    context = build_summary_context("weekly", dataset)
+    assert context is None
+
+    masked = build_masked_summary(context, history_meta={"mask_level": 1})
+    assert masked["status"] == "no-data"

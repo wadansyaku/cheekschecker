@@ -8,11 +8,8 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: summary-weekly
-  cancel-in-progress: false
-
 env:
+  TZ: Asia/Tokyo
   NOTIFY_MODE: 'newly'
   NOTIFY_FROM_TODAY: '1'
   PING_CHANNEL: '1'
@@ -24,12 +21,18 @@ env:
   ROLLOVER_HOURS_JSON: '{"Sun":2,"Mon":0,"Tue":5,"Wed":5,"Thu":5,"Fri":6,"Sat":6}'
   UA_CONTACT: 'mailto:example@example.com'
 
+concurrency:
+  group: summary-weekly
+  cancel-in-progress: false
+
 jobs:
   summary:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Display trigger info
         run: echo "trigger=${{ github.event_name }} ref=${{ github.ref }} sha=${{ github.sha }}"
@@ -45,26 +48,37 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Run weekly summary
+      - name: Webhook疎通テスト
+        if: github.event_name == 'workflow_dispatch'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python summarize.py --period weekly --ping-only
+
+      - name: Collect weekly dataset
         run: python watch_cheeks.py summary --days 7 --raw-output weekly_summary_raw.json
 
+      - name: Generate weekly summary & notify
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json
+
       - name: Upload raw weekly summary
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: weekly-summary-raw
           path: weekly_summary_raw.json
           retention-days: 7
 
-      - name: Commit masked history
+      - name: Commit masked archives
         run: |
-          if git diff --quiet --exit-code history_masked.json; then
-            echo "No masked history changes to commit"
-          else
-            git config user.email "github-actions@github.com"
-            git config user.name "github-actions"
-            git add history_masked.json
-            git commit -m "chore: update masked history (weekly summary)"
-            git push
+          git config user.email "github-actions@github.com"
+          git config user.name "github-actions"
+          git pull --rebase --autostash origin ${{ github.ref_name }}
+          git add history_masked.json summary_masked.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
           fi
+          git commit -m "chore: update weekly summary"
+          git push origin HEAD:${{ github.ref_name }} || true
