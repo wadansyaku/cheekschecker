@@ -1,1 +1,104 @@
-{}
+{
+  "monthly": {
+    "day_count": 14,
+    "generated_at": "2025-10-15T03:20:33.947786+09:00",
+    "mask_level": 1,
+    "period_end": "2025-10-14",
+    "period_start": "2025-10-01",
+    "stats": {
+      "female": {
+        "average": "7-8",
+        "max": "9+",
+        "median": "5-6"
+      },
+      "ratio": {
+        "average": "<40%",
+        "max": "50±",
+        "median": "40±"
+      },
+      "single": {
+        "average": "3-4",
+        "max": "9+",
+        "median": "3-4"
+      },
+      "total": {
+        "average": "10-19",
+        "max": "50+",
+        "median": "10-19"
+      }
+    },
+    "status": "ok",
+    "top_days": [
+      {
+        "female": "9+",
+        "label": "11日(土)",
+        "ratio": "50±",
+        "single": "9+",
+        "total": "50+"
+      },
+      {
+        "female": "9+",
+        "label": "12日(日)",
+        "ratio": "50±",
+        "single": "7-8",
+        "total": "30-49"
+      },
+      {
+        "female": "9+",
+        "label": "4日(土)",
+        "ratio": "40±",
+        "single": "7-8",
+        "total": "30-49"
+      }
+    ],
+    "trend": {
+      "female": "unknown",
+      "ratio": "unknown",
+      "single": "unknown"
+    },
+    "weekday_profile": {
+      "土": {
+        "female": "9+",
+        "ratio": "40±",
+        "single": "7-8",
+        "total": "30-49"
+      },
+      "日": {
+        "female": "9+",
+        "ratio": "40±",
+        "single": "5-6",
+        "total": "20-29"
+      },
+      "月": {
+        "female": "0",
+        "ratio": "<40%",
+        "single": "0",
+        "total": "<10"
+      },
+      "木": {
+        "female": "5-6",
+        "ratio": "40±",
+        "single": "1",
+        "total": "10-19"
+      },
+      "水": {
+        "female": "3-4",
+        "ratio": "<40%",
+        "single": "2",
+        "total": "10-19"
+      },
+      "火": {
+        "female": "7-8",
+        "ratio": "<40%",
+        "single": "2",
+        "total": "10-19"
+      },
+      "金": {
+        "female": "9+",
+        "ratio": "40±",
+        "single": "3-4",
+        "total": "20-29"
+      }
+    }
+  }
+}
