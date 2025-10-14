@@ -1,5 +1,5 @@
 import sys
-from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -7,9 +7,11 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 import pytest
 
 from watch_cheeks import (
+    DEFAULT_ROLLOVER_HOURS,
     Settings,
     diff_changes,
     evaluate_conditions,
+    infer_entry_date,
     parse_day_entries,
 )
 
@@ -25,12 +27,18 @@ BASE_SETTINGS = Settings(
     include_dow=(),
     notify_mode="newly",
     debug_summary=False,
+    cooldown_minutes=180,
+    bonus_single_delta=2,
+    bonus_ratio_threshold=0.5,
+    ping_channel=False,
+    ignore_older_than=1,
+    rollover_hours=dict(DEFAULT_ROLLOVER_HOURS),
 )
 
 
 def test_parse_day_entries_counts_and_single_logic():
     html = FIXTURE_PATH.read_text(encoding="utf-8")
-    stats = parse_day_entries(html, BASE_SETTINGS)
+    stats = parse_day_entries(html, BASE_SETTINGS, reference_date=date(2024, 1, 15))
 
     assert [entry["day"] for entry in stats] == [1, 2, 3, 4, 5, 6, 7]
 
@@ -41,6 +49,7 @@ def test_parse_day_entries_counts_and_single_logic():
     assert "スタッフ♀A" in day1["entries"]
     assert pytest.approx(day1["ratio"], 0.01) == 2 / 3
     assert day1["dow"] == "Sun"
+    assert day1["business_day"].endswith("-01")
 
     day2 = next(entry for entry in stats if entry["day"] == 2)
     assert day2["female"] == 1  # ♀A → female=1, single=1
@@ -75,48 +84,100 @@ def test_parse_day_entries_counts_and_single_logic():
 
 def test_evaluate_conditions_with_weekday_thresholds():
     stats = [
-        {"day": 10, "dow": "Fri", "dow_en": "Fri", "single_female": 5, "female": 6, "male": 4, "total": 10, "ratio": 0.6},
-        {"day": 11, "dow": "Fri", "dow_en": "Fri", "single_female": 4, "female": 5, "male": 2, "total": 7, "ratio": 0.71},
-        {"day": 12, "dow": "Tue", "dow_en": "Tue", "single_female": 3, "female": 3, "male": 2, "total": 5, "ratio": 0.6},
-        {"day": 13, "dow": "Tue", "dow_en": "Tue", "single_female": 3, "female": 3, "male": 5, "total": 8, "ratio": 0.375},
-        {"day": 14, "dow": "Sun", "dow_en": "Sun", "single_female": 4, "female": 4, "male": 0, "total": 4, "ratio": 1.0},
+        {
+            "day": 10,
+            "business_day": "2024-04-10",
+            "dow": "Fri",
+            "dow_en": "Fri",
+            "single_female": 5,
+            "female": 6,
+            "male": 4,
+            "total": 10,
+            "ratio": 0.6,
+        },
+        {
+            "day": 11,
+            "business_day": "2024-04-11",
+            "dow": "Fri",
+            "dow_en": "Fri",
+            "single_female": 4,
+            "female": 5,
+            "male": 2,
+            "total": 7,
+            "ratio": 0.71,
+        },
+        {
+            "day": 12,
+            "business_day": "2024-04-12",
+            "dow": "Tue",
+            "dow_en": "Tue",
+            "single_female": 3,
+            "female": 3,
+            "male": 2,
+            "total": 5,
+            "ratio": 0.6,
+        },
+        {
+            "day": 13,
+            "business_day": "2024-04-13",
+            "dow": "Tue",
+            "dow_en": "Tue",
+            "single_female": 3,
+            "female": 3,
+            "male": 5,
+            "total": 8,
+            "ratio": 0.375,
+        },
+        {
+            "day": 14,
+            "business_day": "2024-04-14",
+            "dow": "Sun",
+            "dow_en": "Sun",
+            "single_female": 4,
+            "female": 4,
+            "male": 0,
+            "total": 4,
+            "ratio": 1.0,
+        },
     ]
-    cfg = replace(
-        BASE_SETTINGS,
-        female_min=3,
-        female_ratio_min=0.5,
-        min_total=4,
-        include_dow=("Fri", "Tue"),
-    )
+    cfg = BASE_SETTINGS
 
     evaluated = evaluate_conditions(stats, cfg)
 
     entry1, entry2, entry3, entry4, entry5 = evaluated
     assert entry1["considered"] is True
-    assert entry1["meets"] is True  # Fri: 単女5&女性比0.6>=0.5
+    assert entry1["meets"] is True  # Fri: 単女5&女性比0.6>=0.4
     assert entry1["required_single_female"] == 5
 
     assert entry2["considered"] is True
     assert entry2["meets"] is False  # 単女不足
 
     assert entry3["considered"] is True
-    assert entry3["meets"] is True  # Tue: 単女3&女性比0.6>=0.5
+    assert entry3["meets"] is True  # Tue: 単女3&女性比0.6>=0.4
     assert entry3["required_single_female"] == 3
 
     assert entry4["considered"] is True
     assert entry4["meets"] is False  # 女性比不足
 
-    assert entry5["considered"] is False  # INCLUDE_DOW 対象外
-    assert entry5["meets"] is False
+    assert entry5["considered"] is True
+    assert entry5["meets"] is True
 
 
 def test_diff_changes_newly_and_changed_detection():
     prev = {
-        "1": {"male": 1, "female": 2, "single_female": 1, "total": 3, "ratio": 0.667, "meets": False},
+        "2024-01-01": {
+            "male": 1,
+            "female": 2,
+            "single_female": 1,
+            "total": 3,
+            "ratio": 0.667,
+            "meets": False,
+        },
     }
     stats = [
         {
             "day": 1,
+            "business_day": "2024-01-01",
             "male": 1,
             "female": 3,
             "single_female": 2,
@@ -127,6 +188,7 @@ def test_diff_changes_newly_and_changed_detection():
         },
         {
             "day": 2,
+            "business_day": "2024-01-02",
             "male": 0,
             "female": 3,
             "single_female": 3,
@@ -137,6 +199,7 @@ def test_diff_changes_newly_and_changed_detection():
         },
         {
             "day": 3,
+            "business_day": "2024-01-03",
             "male": 0,
             "female": 2,
             "single_female": 2,
@@ -149,6 +212,18 @@ def test_diff_changes_newly_and_changed_detection():
 
     changed, newly_met, status_changes = diff_changes(prev, stats)
 
-    assert {entry["day"] for entry in changed} == {1, 2}
-    assert {entry["day"] for entry in newly_met} == {1, 2}
-    assert {entry["day"] for entry in status_changes} == {1, 2}
+    assert {entry["business_day"] for entry in changed} == {"2024-01-01", "2024-01-02"}
+    assert {entry["business_day"] for entry in newly_met} == {"2024-01-01", "2024-01-02"}
+    assert {entry["business_day"] for entry in status_changes} == {"2024-01-01", "2024-01-02"}
+
+
+@pytest.mark.parametrize(
+    "reference_day, cell_day, expected",
+    [
+        (date(2024, 4, 5), 31, date(2024, 3, 31)),  # spill-back to previous month
+        (date(2024, 4, 28), 1, date(2024, 5, 1)),  # spill-over to next month
+        (date(2024, 7, 15), 20, date(2024, 7, 20)),
+    ],
+)
+def test_infer_entry_date(reference_day, cell_day, expected):
+    assert infer_entry_date(cell_day, reference_day) == expected
