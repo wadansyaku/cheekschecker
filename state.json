@@ -1,21 +1,5 @@
 {
   "etag": null,
   "last_modified": null,
-  "days": {
-    "2025-10-14": {
-      "male": 6,
-      "female": 2,
-      "single_female": 0,
-      "total": 8,
-      "ratio": 0.25,
-      "meets": false,
-      "dow": "Tue",
-      "dow_en": "Tue",
-      "considered": true,
-      "required_single_female": 3,
-      "ratio_threshold": 0.4,
-      "stage": "none",
-      "last_notified_at": null
-    }
-  }
+  "days": {}
 }

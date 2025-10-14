@@ -1,11 +1,20 @@
-"""Monitor the monthly calendar and notify Slack when female participation meets thresholds.
+#!/usr/bin/env python3
+"""Cheeks calendar monitor with privacy-aware summaries and Slack notifications.
 
-This version introduces business-day rollovers, advanced stage notifications, and
-additional observability hooks to help diagnose discrepancies between the fetched HTML
-and parsed statistics.
+This module provides two entry points:
+
+* ``monitor`` (default) fetches the reservation calendar, detects qualifying days
+  for the current and future business days, and sends Slack notifications while
+  persisting state for stage transitions.
+* ``summary`` aggregates trailing statistics (weekly/monthly) and posts masked
+  history information plus trend analysis to Slack.
+
+Public operation requirements are addressed via masking levels, robots.txt
+compliance, and privacy-conscious artifact generation.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import calendar
 import hashlib
@@ -13,10 +22,13 @@ import json
 import logging
 import os
 import re
+import statistics
+import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
@@ -27,37 +39,24 @@ from zoneinfo import ZoneInfo
 LOGGER = logging.getLogger("cheekswatch")
 
 STATE_PATH = Path("state.json")
-DOW_EN = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+HISTORY_MASKED_PATH = Path("history_masked.json")
 JST = ZoneInfo("Asia/Tokyo")
+
+DOW_EN = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+DOW_JP = {"Sun": "日", "Mon": "月", "Tue": "火", "Wed": "水", "Thu": "木", "Fri": "金", "Sat": "土"}
 
 DEFAULT_ROLLOVER_HOURS = {"Sun": 2, "Mon": 0, "Tue": 5, "Wed": 5, "Thu": 5, "Fri": 6, "Sat": 6}
 DEFAULT_COOLDOWN_MINUTES = 180
 DEFAULT_BONUS_SINGLE_DELTA = 2
 DEFAULT_BONUS_RATIO_THRESHOLD = 0.50
-DEFAULT_IGNORE_OLDER_THAN = 1
+DEFAULT_NOTIFY_FROM_TODAY = 1
+DEFAULT_MASK_LEVEL = 1
 
+DEFAULT_TARGET_URL = "http://cheeks.nagoya/yoyaku.shtml"
+DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+DEFAULT_USER_AGENT_ID = "CheekscheckerBot/1.0"
 
-@dataclass(frozen=True)
-class Settings:
-    """Runtime settings derived from environment variables."""
-
-    target_url: str
-    slack_webhook_url: Optional[str]
-    female_min: int
-    female_ratio_min: float
-    min_total: Optional[int]
-    exclude_keywords: Tuple[str, ...]
-    include_dow: Tuple[str, ...]
-    notify_mode: str
-    debug_summary: bool
-    cooldown_minutes: int
-    bonus_single_delta: int
-    bonus_ratio_threshold: float
-    ping_channel: bool
-    ignore_older_than: int
-    rollover_hours: Dict[str, int]
-
-
+DATE_KEY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 FULLWIDTH_TO_ASCII = str.maketrans({
     "０": "0",
     "１": "1",
@@ -70,18 +69,131 @@ FULLWIDTH_TO_ASCII = str.maketrans({
     "８": "8",
     "９": "9",
 })
-
 MULTIPLIER_PATTERN = re.compile(r"(?:[×xX＊*])\s*([0-9０-９]+)")
 GROUP_COUNT_PATTERN = re.compile(r"([0-9０-９]+)\s*(?:人|名|組)")
-DATE_KEY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+MASK_COUNT_BANDS = [
+    (0, 0, "0"),
+    (1, 1, "1"),
+    (2, 2, "2"),
+    (3, 4, "3-4"),
+    (5, 6, "5-6"),
+    (7, 8, "7-8"),
+    (9, None, "9+")
+]
+MASK_TOTAL_BANDS = [
+    (0, 9, "<10"),
+    (10, 19, "10-19"),
+    (20, 29, "20-29"),
+    (30, 49, "30-49"),
+    (50, None, "50+")
+]
+MASK_RATIO_BANDS = [
+    (0.0, 0.39, "<40%"),
+    (0.40, 0.49, "40±"),
+    (0.50, 0.59, "50±"),
+    (0.60, 0.69, "60±"),
+    (0.70, 0.79, "70±"),
+    (0.80, None, "80+%"),
+]
+MASK_LEVEL2_WORDS = {
+    "single": ["静" , "穏", "賑"],
+    "female": ["薄", "適", "厚"],
+    "ratio": ["低", "中", "高"],
+    "total": ["少", "並", "盛"],
+}
 
 
-def _configure_logging() -> None:
-    """Initialise logging based on DEBUG_LOG flag."""
+@dataclass(frozen=True)
+class Settings:
+    target_url: str
+    slack_webhook_url: Optional[str]
+    female_min: int
+    female_ratio_min: float
+    min_total: Optional[int]
+    exclude_keywords: Tuple[str, ...]
+    include_dow: Tuple[str, ...]
+    notify_mode: str
+    debug_summary: bool
+    ping_channel: bool
+    cooldown_minutes: int
+    bonus_single_delta: int
+    bonus_ratio_threshold: float
+    ignore_older_than: int
+    notify_from_today: int
+    rollover_hours: Dict[str, int]
+    mask_level: int
+    robots_enforce: bool
+    ua_contact: Optional[str]
+    history_masked_path: Path = field(default=HISTORY_MASKED_PATH)
 
+
+@dataclass
+class DailyEntry:
+    raw_date: date
+    business_day: date
+    day_of_month: int
+    dow_en: str
+    male: int
+    female: int
+    single_female: int
+    total: int
+    ratio: float
+    considered: bool
+    meets: bool
+    required_single: int
+
+
+@dataclass
+class SummaryBundle:
+    period_label: str
+    period_days: List[DailyEntry]
+    previous_days: List[DailyEntry]
+
+
+def configure_logging() -> None:
     level = logging.DEBUG if os.getenv("DEBUG_LOG") == "1" else logging.INFO
     logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
-    LOGGER.debug("Logging configured. Level=%s", logging.getLevelName(level))
+    LOGGER.debug("Logging configured at level=%s", logging.getLevelName(level))
+
+
+def _parse_keywords(raw: str) -> Tuple[str, ...]:
+    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def _normalise_dow(values: Iterable[str]) -> Tuple[str, ...]:
+    mapping = {d.lower(): d for d in DOW_EN}
+    normalised: List[str] = []
+    for value in values:
+        lowered = value.strip().lower()
+        if not lowered:
+            continue
+        if lowered not in mapping:
+            LOGGER.warning("Unknown INCLUDE_DOW value: %s", value)
+            continue
+        normalised.append(mapping[lowered])
+    return tuple(normalised)
+
+
+def _parse_int(value: Optional[str], default: int, *, floor: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+        return max(floor, parsed)
+    except (TypeError, ValueError):
+        LOGGER.warning("Failed to parse integer env=%s; using default=%s", value, default)
+        return default
+
+
+def _parse_float(value: Optional[str], default: float) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        LOGGER.warning("Failed to parse float env=%s; using default=%s", value, default)
+        return default
 
 
 def _parse_min_total(value: Optional[str]) -> Optional[int]:
@@ -91,117 +203,57 @@ def _parse_min_total(value: Optional[str]) -> Optional[int]:
         parsed = int(value)
         return parsed if parsed >= 0 else None
     except ValueError:
-        LOGGER.warning("Invalid MIN_TOTAL value %s. Ignored.", value)
+        LOGGER.warning("Invalid MIN_TOTAL value=%s", value)
         return None
-
-
-def _normalise_dow(values: Iterable[str]) -> Tuple[str, ...]:
-    mapping = {d.lower(): d for d in DOW_EN}
-    normalised: List[str] = []
-    for value in values:
-        key = value.strip().lower()
-        if not key:
-            continue
-        if key not in mapping:
-            LOGGER.warning("Unknown day-of-week identifier: %s", value)
-            continue
-        normalised.append(mapping[key])
-    return tuple(normalised)
-
-
-def _parse_keywords(raw: str) -> Tuple[str, ...]:
-    return tuple(keyword.strip().lower() for keyword in raw.split(",") if keyword.strip())
-
-
-def _parse_bool(value: Optional[str], *, default: bool = False) -> bool:
-    if value is None:
-        return default
-    return value.strip() in {"1", "true", "True", "yes", "on"}
 
 
 def _parse_rollover_hours(raw: Optional[str]) -> Dict[str, int]:
     if not raw:
         return dict(DEFAULT_ROLLOVER_HOURS)
     try:
-        parsed = json.loads(raw)
+        data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        LOGGER.warning("Failed to parse ROLLOVER_HOURS_JSON=%s: %s", raw, exc)
+        LOGGER.warning("Failed to parse ROLLOVER_HOURS_JSON=%s (%s)", raw, exc)
         return dict(DEFAULT_ROLLOVER_HOURS)
-    result: Dict[str, int] = dict(DEFAULT_ROLLOVER_HOURS)
-    for key, value in parsed.items():
+    merged = dict(DEFAULT_ROLLOVER_HOURS)
+    for key, value in data.items():
         if key not in DOW_EN:
-            LOGGER.warning("Unknown rollover day key: %s", key)
+            LOGGER.warning("Unknown rollover key=%s", key)
             continue
         try:
-            result[key] = max(0, int(value))
+            merged[key] = max(0, int(value))
         except (TypeError, ValueError):
             LOGGER.warning("Invalid rollover hour for %s: %s", key, value)
-    return result
+    return merged
 
 
 def load_settings() -> Settings:
-    """Load runtime settings from environment variables."""
-
-    target_url = os.getenv("TARGET_URL", "http://cheeks.nagoya/yoyaku.shtml")
-    slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
-    female_min = int(os.getenv("FEMALE_MIN", "3"))
-    female_ratio_min = float(os.getenv("FEMALE_RATIO_MIN", "0.3"))
+    target_url = os.getenv("TARGET_URL", DEFAULT_TARGET_URL)
+    slack_webhook = os.getenv("SLACK_WEBHOOK_URL")
+    female_min = _parse_int(os.getenv("FEMALE_MIN"), 3)
+    female_ratio_min = _parse_float(os.getenv("FEMALE_RATIO_MIN"), 0.3)
     min_total = _parse_min_total(os.getenv("MIN_TOTAL"))
-
     exclude_keywords = _parse_keywords(os.getenv("EXCLUDE_KEYWORDS", ""))
     include_dow = _normalise_dow(os.getenv("INCLUDE_DOW", "").split(","))
-
     notify_mode = os.getenv("NOTIFY_MODE", "newly").strip().lower()
     if notify_mode not in {"newly", "changed"}:
-        LOGGER.warning("Unknown NOTIFY_MODE=%s. Falling back to 'newly'.", notify_mode)
+        LOGGER.warning("Unsupported NOTIFY_MODE=%s; falling back to newly", notify_mode)
         notify_mode = "newly"
-
-    debug_summary = _parse_bool(os.getenv("DEBUG_SUMMARY"))
-
-    cooldown_env = os.getenv("COOLDOWN_MINUTES", str(DEFAULT_COOLDOWN_MINUTES))
-    try:
-        cooldown_minutes = max(0, int(cooldown_env))
-    except (TypeError, ValueError):
-        LOGGER.warning("Invalid COOLDOWN_MINUTES=%s. Falling back to %s.", cooldown_env, DEFAULT_COOLDOWN_MINUTES)
-        cooldown_minutes = DEFAULT_COOLDOWN_MINUTES
-
-    bonus_single_delta_env = os.getenv("BONUS_SINGLE_DELTA", str(DEFAULT_BONUS_SINGLE_DELTA))
-    try:
-        bonus_single_delta = max(0, int(bonus_single_delta_env))
-    except (TypeError, ValueError):
-        LOGGER.warning(
-            "Invalid BONUS_SINGLE_DELTA=%s. Falling back to %s.",
-            bonus_single_delta_env,
-            DEFAULT_BONUS_SINGLE_DELTA,
-        )
-        bonus_single_delta = DEFAULT_BONUS_SINGLE_DELTA
-
-    bonus_ratio_env = os.getenv("BONUS_RATIO_THRESHOLD", str(DEFAULT_BONUS_RATIO_THRESHOLD))
-    try:
-        bonus_ratio_threshold = float(bonus_ratio_env)
-    except (TypeError, ValueError):
-        LOGGER.warning(
-            "Invalid BONUS_RATIO_THRESHOLD=%s. Falling back to %.2f.",
-            bonus_ratio_env,
-            DEFAULT_BONUS_RATIO_THRESHOLD,
-        )
-        bonus_ratio_threshold = DEFAULT_BONUS_RATIO_THRESHOLD
-
-    ignore_env = os.getenv("IGNORE_OLDER_THAN", str(DEFAULT_IGNORE_OLDER_THAN))
-    try:
-        ignore_older_than = max(0, int(ignore_env))
-    except (TypeError, ValueError):
-        LOGGER.warning(
-            "Invalid IGNORE_OLDER_THAN=%s. Falling back to %s.", ignore_env, DEFAULT_IGNORE_OLDER_THAN
-        )
-        ignore_older_than = DEFAULT_IGNORE_OLDER_THAN
-
-    ping_channel = _parse_bool(os.getenv("PING_CHANNEL"), default=True)
+    debug_summary = os.getenv("DEBUG_SUMMARY") == "1"
+    ping_channel = os.getenv("PING_CHANNEL", "1").strip() not in {"0", "false", "False"}
+    cooldown_minutes = _parse_int(os.getenv("COOLDOWN_MINUTES"), DEFAULT_COOLDOWN_MINUTES)
+    bonus_single_delta = _parse_int(os.getenv("BONUS_SINGLE_DELTA"), DEFAULT_BONUS_SINGLE_DELTA)
+    bonus_ratio_threshold = _parse_float(os.getenv("BONUS_RATIO_THRESHOLD"), DEFAULT_BONUS_RATIO_THRESHOLD)
+    ignore_older_than = _parse_int(os.getenv("IGNORE_OLDER_THAN"), 1)
+    notify_from_today = _parse_int(os.getenv("NOTIFY_FROM_TODAY"), DEFAULT_NOTIFY_FROM_TODAY)
     rollover_hours = _parse_rollover_hours(os.getenv("ROLLOVER_HOURS_JSON"))
+    mask_level = _parse_int(os.getenv("MASK_LEVEL"), DEFAULT_MASK_LEVEL)
+    robots_enforce = os.getenv("ROBOTS_ENFORCE", "0") in {"1", "true", "True"}
+    ua_contact = os.getenv("UA_CONTACT")
 
     settings = Settings(
         target_url=target_url,
-        slack_webhook_url=slack_webhook_url,
+        slack_webhook_url=slack_webhook,
         female_min=female_min,
         female_ratio_min=female_ratio_min,
         min_total=min_total,
@@ -209,153 +261,41 @@ def load_settings() -> Settings:
         include_dow=include_dow,
         notify_mode=notify_mode,
         debug_summary=debug_summary,
+        ping_channel=ping_channel,
         cooldown_minutes=cooldown_minutes,
         bonus_single_delta=bonus_single_delta,
         bonus_ratio_threshold=bonus_ratio_threshold,
-        ping_channel=ping_channel,
         ignore_older_than=ignore_older_than,
+        notify_from_today=notify_from_today,
         rollover_hours=rollover_hours,
+        mask_level=mask_level,
+        robots_enforce=robots_enforce,
+        ua_contact=ua_contact,
     )
-    LOGGER.debug("Settings loaded: %s", settings)
+    LOGGER.debug("Loaded settings: %s", settings)
     return settings
 
 
-_configure_logging()
-SETTINGS = load_settings()
+def _business_dow_label(dt: date) -> str:
+    return DOW_EN[(dt.weekday() + 1) % 7]
 
 
-def load_state(reference_date: date) -> Dict[str, Any]:
-    """Load persisted state from disk and upgrade keys to business-day format."""
-
-    if STATE_PATH.exists():
-        try:
-            state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-            LOGGER.debug("Loaded state: %s", state)
-        except json.JSONDecodeError as exc:
-            LOGGER.error("Failed to decode state.json: %s", exc)
-            state = {"etag": None, "last_modified": None, "days": {}}
+def derive_business_day(now: datetime, rollover_hours: Dict[str, int]) -> date:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=JST)
     else:
-        state = {"etag": None, "last_modified": None, "days": {}}
-    return upgrade_state_keys(state, reference_date)
-
-
-def upgrade_state_keys(state: Dict[str, Any], reference_date: date) -> Dict[str, Any]:
-    days = state.get("days")
-    if not isinstance(days, dict):
-        state["days"] = {}
-        return state
-
-    upgraded: Dict[str, Any] = {}
-    for key, value in days.items():
-        if isinstance(key, str) and DATE_KEY_PATTERN.match(key):
-            upgraded[key] = value
-            continue
-        if isinstance(key, str) and key.isdigit():
-            inferred_date = infer_entry_date(int(key), reference_date)
-            upgraded[inferred_date.isoformat()] = value
-            continue
-        LOGGER.debug("Dropping legacy state entry with unexpected key=%s", key)
-    state["days"] = upgraded
-    return state
-
-
-def save_state(state: Dict[str, Any]) -> None:
-    """Persist state to disk atomically."""
-
-    tmp = STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(STATE_PATH)
-    LOGGER.debug("State saved to %s", STATE_PATH)
-
-
-def should_skip_by_http_headers(settings: Settings, prev: Dict[str, Any]) -> Tuple[bool, Dict[str, Optional[str]]]:
-    """Return whether fetching can be skipped using HEAD headers."""
-
-    try:
-        response = requests.head(settings.target_url, timeout=10)
-        response.raise_for_status()
-        etag = response.headers.get("ETag")
-        last_modified = response.headers.get("Last-Modified")
-        same = False
-        if etag and prev.get("etag") and etag == prev.get("etag"):
-            same = True
-        if last_modified and prev.get("last_modified") and last_modified == prev.get("last_modified"):
-            same = True
-        LOGGER.info("HEAD check completed. skip=%s", same)
-        return same, {"etag": etag, "last_modified": last_modified}
-    except Exception as exc:  # pragma: no cover - network exceptions vary
-        LOGGER.warning("HEAD check failed: %s", exc)
-        return False, {"etag": None, "last_modified": None}
-
-
-async def fetch_calendar_html(settings: Settings) -> str:
-    """Fetch the calendar HTML and return the relevant table HTML when available."""
-
-    LOGGER.info("Fetching calendar HTML from %s", settings.target_url)
-
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = await browser.new_context(
-            locale="ja-JP",
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
-            extra_http_headers={"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"},
-        )
-        page = await context.new_page()
-
-        table_html: Optional[str] = None
-        source_url = settings.target_url
-        try:
-            await page.goto(settings.target_url, wait_until="domcontentloaded", timeout=60_000)
-
-            async def extract_from_frame(frame) -> Optional[str]:
-                try:
-                    return await frame.evaluate(
-                        "() => {"
-                        "  const table = document.querySelector(\"table[border='2']\");"
-                        "  return table ? table.outerHTML : null;"
-                        "}"
-                    )
-                except Exception as exc:  # pragma: no cover
-                    LOGGER.debug("Frame extraction failed (%s): %s", frame.url, exc)
-                    return None
-
-            main_table = await extract_from_frame(page.main_frame)
-            if main_table:
-                table_html = main_table
-                source_url = page.main_frame.url or settings.target_url
-            else:
-                for frame in page.frames:
-                    if frame is page.main_frame:
-                        continue
-                    frame_table = await extract_from_frame(frame)
-                    if frame_table:
-                        table_html = frame_table
-                        source_url = frame.url or settings.target_url
-                        break
-
-            if table_html:
-                digest = hashlib.sha256(table_html.encode("utf-8", "ignore")).hexdigest()
-                LOGGER.info("Fetched table outerHTML from frame=%s sha256=%s length=%d", source_url, digest, len(table_html))
-                return table_html
-
-            html = await page.content()
-            digest = hashlib.sha256(html.encode("utf-8", "ignore")).hexdigest()
-            LOGGER.info("Fetched full page content sha256=%s length=%d", digest, len(html))
-            return html
-        finally:
-            await context.close()
-            await browser.close()
+        now = now.astimezone(JST)
+    dow_label = DOW_EN[(now.weekday() + 1) % 7]
+    cutoff = rollover_hours.get(dow_label, 0)
+    if now.hour < cutoff:
+        business_day = (now - timedelta(days=1)).date()
+    else:
+        business_day = now.date()
+    LOGGER.info("Derived business day=%s from now=%s cutoff=%s", business_day, now.isoformat(), cutoff)
+    return business_day
 
 
 def _should_exclude_text(text: str, keywords: Sequence[str]) -> bool:
-    """Return True if the text should be excluded based on keywords (スタッフは除外しない)."""
-
     lowered = text.lower()
     for keyword in keywords:
         if not keyword:
@@ -368,8 +308,6 @@ def _should_exclude_text(text: str, keywords: Sequence[str]) -> bool:
 
 
 def _extract_numeric_counts(text: str) -> List[int]:
-    """Extract numeric counts referenced within a participant description."""
-
     counts: List[int] = []
     for match in MULTIPLIER_PATTERN.finditer(text):
         digits = match.group(1).translate(FULLWIDTH_TO_ASCII)
@@ -387,34 +325,25 @@ def _extract_numeric_counts(text: str) -> List[int]:
 
 
 def _count_participant_line(text: str) -> Tuple[int, int, int]:
-    """Return the male, female and single female counts for a single line."""
-
     male_count = text.count("♂")
-    female_symbol_count = text.count("♀")
+    female_symbols = text.count("♀")
     numbers = _extract_numeric_counts(text)
 
-    female_count = female_symbol_count
-    if female_symbol_count > 0 and male_count == 0:
-        female_count = max(female_symbol_count, max(numbers) if numbers else female_symbol_count)
+    female_count = female_symbols
+    if female_symbols > 0 and male_count == 0:
+        female_count = max(female_symbols, max(numbers) if numbers else female_symbols)
     numeric_value = max(numbers) if numbers else female_count
     single = 1 if female_count == 1 and male_count == 0 and numeric_value <= 1 else 0
     return male_count, female_count, single
 
 
-def _dow_from_index(index: int) -> str:
-    return DOW_EN[index % len(DOW_EN)]
-
-
 def infer_entry_date(day: int, reference_date: date) -> date:
-    """Infer the full date for a calendar cell based on the reference date."""
-
     if day < 1:
         day = 1
     year = reference_date.year
     month = reference_date.month
 
     if reference_date.day <= 7 and day >= 25:
-        # Beginning of month – treat as previous month spill-over.
         if month == 1:
             prev_year, prev_month = year - 1, 12
         else:
@@ -423,7 +352,6 @@ def infer_entry_date(day: int, reference_date: date) -> date:
         return date(prev_year, prev_month, min(day, last_day))
 
     if reference_date.day >= 25 and day <= 7:
-        # End of month – treat as next month entry.
         if month == 12:
             next_year, next_month = year + 1, 1
         else:
@@ -435,155 +363,132 @@ def infer_entry_date(day: int, reference_date: date) -> date:
     return date(year, month, min(day, last_day_current))
 
 
-def parse_day_entries(html: str, settings: Optional[Settings] = None, *, reference_date: Optional[date] = None) -> List[Dict[str, Any]]:
-    """Parse the calendar HTML and extract daily participation entries."""
-
-    cfg = settings or SETTINGS
-    ref_date = reference_date or datetime.now(tz=JST).date()
+def parse_day_entries(
+    html: str,
+    *,
+    settings: Optional[Settings] = None,
+    reference_date: Optional[date] = None,
+) -> List[DailyEntry]:
+    cfg = settings or load_settings()
     soup = BeautifulSoup(html, "lxml")
+    table = soup.find("table", attrs={"border": "2"})
+    if not table:
+        LOGGER.warning("Calendar table not found; returning empty list")
+        return []
 
-    table = soup.select_one("table[border='2']")
-    scope_hint = "table[border='2']"
-    if table is None:
-        table = soup.find("table")
-        if table is not None:
-            scope_hint = "table-fallback"
-        else:
-            table = soup
-            scope_hint = "document"
-    LOGGER.debug("Parsing day entries using scope: %s", scope_hint)
+    today = reference_date or datetime.now(tz=JST).date()
+    results: List[DailyEntry] = []
 
-    results: List[Dict[str, Any]] = []
-    rows = table.find_all("tr") if hasattr(table, "find_all") else []
+    rows = table.find_all("tr")
+    if not rows:
+        return []
 
     for row in rows:
-        columns = [td for td in row.find_all("td") if td.get("valign", "").lower() == "top"]
-        for col_index, td in enumerate(columns):
-            centers = td.find_all("center")
-            if not centers:
+        cells = row.find_all("td")
+        if not cells:
+            continue
+        for cell in cells:
+            parts = [part.strip() for part in cell.stripped_strings if part.strip()]
+            if not parts:
                 continue
-
-            day_text = centers[0].get_text(strip=True)
-            if not day_text:
+            number_match = None
+            for part in parts:
+                number_match = re.search(r"(\d{1,2})", part)
+                if number_match:
+                    break
+            if not number_match:
                 continue
-            match = re.search(r"\d+", day_text)
-            if not match:
-                continue
-            day = int(match.group())
-            entry_date = infer_entry_date(day, ref_date)
+            day_of_month = int(number_match.group(1))
+            cell_date = infer_entry_date(day_of_month, today)
+            business_dow = _business_dow_label(cell_date)
 
-            participant_parent = None
-            if len(centers) >= 3:
-                participant_parent = centers[2]
-            elif len(centers) >= 2:
-                participant_parent = centers[1]
-
-            fonts = participant_parent.find_all("font") if participant_parent else []
-            if not fonts:
-                fonts = td.find_all("font")
-
-            male_total = 0
-            female_total = 0
-            single_total = 0
-            valid_texts: List[str] = []
-
-            for font in fonts:
-                text = font.get_text(strip=True)
-                if not text:
+            content_lines: List[str] = []
+            for part in parts:
+                if re.fullmatch(r"\d{1,2}", part):
                     continue
-                if _should_exclude_text(text, cfg.exclude_keywords):
-                    LOGGER.debug(
-                        "Excluded text '%s' for day %s due to keyword filter (スタッフ除外対象外).",
-                        text,
-                        day,
-                    )
+                if part.lower() in {"sun", "mon", "tue", "wed", "thu", "fri", "sat"}:
                     continue
-                male_count, female_count, single_count = _count_participant_line(text)
-                male_total += male_count
-                female_total += female_count
-                single_total += single_count
-                valid_texts.append(text)
+                content_lines.append(part)
 
-            dow = _dow_from_index(col_index)
+            male_total = female_total = single_total = 0
+            valid_lines: List[str] = []
+            for line in content_lines:
+                if _should_exclude_text(line, cfg.exclude_keywords):
+                    continue
+                male, female, single = _count_participant_line(line)
+                male_total += male
+                female_total += female
+                single_total += single
+                valid_lines.append(line)
+
             total = male_total + female_total
             ratio = (female_total / total) if total else 0.0
-            entry = {
-                "day": day,
-                "date": entry_date,
-                "business_day": entry_date.isoformat(),
-                "dow_index": col_index % len(DOW_EN),
-                "dow": dow,
-                "dow_en": dow,
-                "male": male_total,
-                "female": female_total,
-                "single_female": single_total,
-                "total": total,
-                "ratio": ratio,
-                "entries": valid_texts,
-            }
+            dow_value = business_dow
+            considered = True
+            if cfg.include_dow and dow_value not in cfg.include_dow:
+                considered = False
+            if cfg.min_total is not None and total < cfg.min_total:
+                considered = False
+
+            required_single = 5 if business_dow in {"Fri", "Sat"} else 3
+            female_required = max(cfg.female_min, required_single)
+            ratio_threshold = max(0.40, cfg.female_ratio_min)
+            meets = (
+                considered
+                and single_total >= required_single
+                and female_total >= female_required
+                and ratio >= ratio_threshold
+                and total > 0
+            )
+
+            entry = DailyEntry(
+                raw_date=cell_date,
+                business_day=cell_date,
+                day_of_month=day_of_month,
+                dow_en=business_dow,
+                male=male_total,
+                female=female_total,
+                single_female=single_total,
+                total=total,
+                ratio=round(ratio, 4),
+                considered=considered,
+                meets=meets,
+                required_single=required_single,
+            )
             LOGGER.debug("Parsed entry: %s", entry)
             results.append(entry)
 
-    results.sort(key=lambda item: (item["date"], item["dow_index"]))
+    results.sort(key=lambda e: e.business_day)
     return results
 
 
-def evaluate_conditions(
-    stats: Sequence[Dict[str, Any]],
-    settings: Optional[Settings] = None,
-) -> List[Dict[str, Any]]:
-    """Evaluate thresholds and mark whether each day meets alert conditions."""
-
-    cfg = settings or SETTINGS
-    evaluated: List[Dict[str, Any]] = []
-    ratio_threshold = max(0.40, cfg.female_ratio_min)
-    for entry in stats:
-        considered = True
-        dow_value = entry.get("dow") or entry.get("dow_en")
-        if cfg.include_dow and dow_value not in cfg.include_dow:
-            considered = False
-        if cfg.min_total is not None and entry.get("total", 0) < cfg.min_total:
-            considered = False
-        ratio = entry.get("ratio", 0.0)
-        required_single = 5 if dow_value in {"Fri", "Sat"} else 3
-        female_total = entry.get("female", 0)
-        single_total = entry.get("single_female", 0)
-        meets = (
-            considered
-            and entry.get("total", 0) > 0
-            and single_total >= required_single
-            and female_total >= max(cfg.female_min, required_single)
-            and ratio >= ratio_threshold
+def log_parsing_snapshot(entries: Sequence[DailyEntry], logical_today: date) -> None:
+    days = [entry.business_day.day for entry in entries]
+    if days:
+        LOGGER.debug(
+            "[DEBUG] days_coverage: count=%d min=%s max=%s", len(days), min(days), max(days)
         )
-        updated = dict(entry)
-        updated["ratio"] = round(ratio, 3)
-        updated["dow"] = dow_value
-        updated["considered"] = considered
-        updated["meets"] = meets
-        updated["required_single_female"] = required_single
-        updated["ratio_threshold"] = ratio_threshold
-        evaluated.append(updated)
-        LOGGER.debug("Evaluated entry: %s", updated)
-    return evaluated
-
-
-def derive_business_day(now: datetime, rollover_hours: Dict[str, int]) -> date:
-    """Derive the logical business day considering rollover cut-off per weekday."""
-
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=JST)
     else:
-        now = now.astimezone(JST)
+        LOGGER.debug("[DEBUG] days_coverage: count=0 min=None max=None")
+    preview_first = [
+        f"{entry.business_day} 単女{entry.single_female} 女{entry.female} 男{entry.male} 全{entry.total} ({int(entry.ratio*100)}%)"
+        for entry in entries[:10]
+    ]
+    preview_last = [
+        f"{entry.business_day} 単女{entry.single_female} 女{entry.female} 男{entry.male} 全{entry.total} ({int(entry.ratio*100)}%)"
+        for entry in entries[-5:]
+    ]
+    LOGGER.debug("[DEBUG] first10: %s", preview_first)
+    LOGGER.debug("[DEBUG] last5: %s", preview_last)
 
-    dow_index = (now.weekday() + 1) % 7
-    dow_label = DOW_EN[dow_index]
-    cutoff_hour = rollover_hours.get(dow_label, 0)
-    if now.hour < cutoff_hour:
-        business_day = (now - timedelta(days=1)).date()
-    else:
-        business_day = now.date()
-    LOGGER.info("Derived business day=%s from now=%s cutoff=%s", business_day, now.isoformat(), cutoff_hour)
-    return business_day
+    latest_nonzero = None
+    for entry in reversed(entries):
+        if entry.total > 0:
+            latest_nonzero = (
+                f"{entry.business_day} {entry.dow_en} total={entry.total} female={entry.female} single={entry.single_female} ratio={entry.ratio:.2f}"
+            )
+            break
+    LOGGER.debug("[DEBUG] latest_nonzero: %s", latest_nonzero or "なし")
 
 
 def _coerce_stage(value: Any) -> str:
@@ -606,7 +511,7 @@ def _coerce_last_notified(value: Any) -> Optional[int]:
 
 
 def evaluate_stage_transition(
-    entry: Dict[str, Any],
+    entry: DailyEntry,
     prev_state: Optional[Dict[str, Any]],
     *,
     now_ts: int,
@@ -614,133 +519,123 @@ def evaluate_stage_transition(
     bonus_single_delta: int,
     bonus_ratio_threshold: float,
 ) -> Tuple[Optional[str], str, Optional[int]]:
-    """Determine notification stage transitions and actions for a business day."""
-
-    meets = bool(entry.get("meets"))
-    single = entry.get("single_female", 0)
-    ratio = entry.get("ratio", 0.0)
-    required_single = entry.get("required_single_female", 0) or 0
+    if not entry.meets:
+        return None, "none", None
 
     prev_stage = _coerce_stage(prev_state.get("stage")) if prev_state else "none"
-    prev_last_notified = _coerce_last_notified(prev_state.get("last_notified_at")) if prev_state else None
+    prev_last = _coerce_last_notified(prev_state.get("last_notified_at")) if prev_state else None
 
     stage = prev_stage
-    last_notified = prev_last_notified
+    last = prev_last
     action: Optional[str] = None
 
-    if not meets:
-        stage = "none"
-        return action, stage, None
-
-    bonus_by_single = single >= required_single + bonus_single_delta
-    bonus_by_ratio = ratio >= bonus_ratio_threshold
+    bonus_by_single = entry.single_female >= entry.required_single + bonus_single_delta
+    bonus_by_ratio = entry.ratio >= bonus_ratio_threshold
 
     if stage == "none":
         action = "initial"
         stage = "initial"
-        last_notified = now_ts
+        last = now_ts
     elif stage == "initial":
         if bonus_by_single or bonus_by_ratio:
             action = "bonus"
             stage = "bonus"
-            last_notified = now_ts
+            last = now_ts
     elif stage == "bonus":
-        if last_notified is not None and now_ts - last_notified >= cooldown_seconds:
-            stage = "initial"
-        elif last_notified is None:
+        if last is None or now_ts - last >= cooldown_seconds:
             stage = "initial"
     else:
         stage = "initial"
         action = "initial"
-        last_notified = now_ts
+        last = now_ts
 
-    return action, stage, last_notified
-
-
-def _format_entry(
-    entry: Dict[str, Any],
-    *,
-    include_male: bool = False,
-    markdown: bool = True,
-) -> str:
-    """Return a human-readable representation of the entry."""
-
-    percent = int(round(entry.get("ratio", 0.0) * 100))
-    dow_value = entry.get("dow") or entry.get("dow_en")
-    business_day = entry.get("business_day")
-    day_label = business_day or f"{entry['day']}日({dow_value})"
-    if markdown:
-        day_label = f"*{day_label}*"
-    components = [f"単女{entry.get('single_female', 0)}", f"女{entry.get('female', 0)}"]
-    if include_male:
-        components.append(f"男{entry.get('male', 0)}")
-    components.append(f"全{entry.get('total', 0)}")
-    detail = " ".join(components)
-    return f"{day_label}: {detail} ({percent}%)"
+    return action, stage, last
 
 
-def _format_stage_notification(
-    entry: Dict[str, Any],
-    *,
-    markdown: bool,
-) -> str:
+def _format_business_label(target: date, logical_today: date) -> str:
+    label = f"{target.day}日({DOW_JP[_business_dow_label(target)]})"
+    if target == logical_today + timedelta(days=1):
+        return f"明日: {label}"
+    if target > logical_today + timedelta(days=1):
+        days_ahead = (target - logical_today).days
+        return f"{days_ahead}日後: {label}"
+    return label
+
+
+def _format_stage_notification(entry: DailyEntry, notification_type: str, logical_today: date) -> str:
+    percent = int(round(entry.ratio * 100))
     label_map = {"initial": "初回", "bonus": "追加"}
-    notification_type = entry.get("notification_type", "")
-    label_text = label_map.get(notification_type, notification_type or "通知")
-    business_day = entry.get("business_day")
-    dow_value = entry.get("dow") or entry.get("dow_en")
-    day_label = business_day or f"{entry['day']}日({dow_value})"
-    if markdown:
-        day_label = f"*{day_label}*"
-    percent = int(round(entry.get("ratio", 0.0) * 100))
+    prefix = label_map.get(notification_type, notification_type)
+    label = _format_business_label(entry.business_day, logical_today)
     return (
-        f"[{label_text}] {day_label}: 単女{entry.get('single_female', 0)} 女{entry.get('female', 0)} "
-        f"/全{entry.get('total', 0)} ({percent}%)"
+        f"[{prefix}] {label}: 単女{entry.single_female} 女{entry.female} "
+        f"/全{entry.total} ({percent}%)"
     )
 
 
-def _build_slack_payload(
-    text: str,
-    newly_met: Sequence[Dict[str, Any]],
-    changed_counts: Sequence[Dict[str, Any]],
+def _format_entry(entry: DailyEntry, logical_today: date, include_male: bool = False) -> str:
+    parts = [f"単女{entry.single_female}", f"女{entry.female}"]
+    if include_male:
+        parts.append(f"男{entry.male}")
+    parts.append(f"全{entry.total}")
+    percent = int(round(entry.ratio * 100))
+    label = _format_business_label(entry.business_day, logical_today)
+    return f"{label}: {' '.join(parts)} ({percent}%)"
+
+
+def build_fallback_text(
+    stage_notifications: Sequence[Tuple[DailyEntry, str]],
+    newly_met: Sequence[DailyEntry],
+    changed_counts: Sequence[DailyEntry],
+    logical_today: date,
+) -> str:
+    lines: List[str] = []
+    if stage_notifications:
+        lines.append("【基準達成通知】")
+        lines.extend(
+            f"- {_format_stage_notification(entry, action, logical_today)}"
+            for entry, action in stage_notifications
+        )
+    if newly_met:
+        lines.append("【新規で条件を満たした日】")
+        lines.extend(f"- {_format_entry(entry, logical_today)}" for entry in newly_met)
+    if changed_counts:
+        lines.append("【人数が更新された日】")
+        lines.extend(
+            f"- {_format_entry(entry, logical_today, include_male=True)}"
+            for entry in changed_counts
+        )
+    return "\n".join(lines) if lines else "該当なし"
+
+
+def _build_slack_blocks(
+    stage_notifications: Sequence[Tuple[DailyEntry, str]],
+    newly_met: Sequence[DailyEntry],
+    changed_counts: Sequence[DailyEntry],
+    logical_today: date,
     settings: Settings,
-    stage_notifications: Optional[Sequence[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
+) -> List[Dict[str, Any]]:
     blocks: List[Dict[str, Any]] = []
-    stage_notifications = list(stage_notifications or [])
+    if settings.ping_channel:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "<!channel>"}})
     if stage_notifications:
         lines = "\n".join(
-            f"• {_format_stage_notification(entry, markdown=True)}"
-            for entry in stage_notifications
+            f"• {_format_stage_notification(entry, action, logical_today)}"
+            for entry, action in stage_notifications
         )
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "*基準達成通知*"},
-            }
-        )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*基準達成通知*"}})
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": lines}})
     if newly_met:
         lines = "\n".join(
-            f"• {_format_entry(entry, markdown=True)}" for entry in newly_met
+            f"• {_format_entry(entry, logical_today)}" for entry in newly_met
         )
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "*新規で条件を満たした日*"},
-            }
-        )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*新規成立日*"}})
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": lines}})
     if changed_counts:
         lines = "\n".join(
-            f"• {_format_entry(entry, include_male=True, markdown=True)}" for entry in changed_counts
+            f"• {_format_entry(entry, logical_today, include_male=True)}" for entry in changed_counts
         )
-        blocks.append(
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "*人数が更新された日*"},
-            }
-        )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*人数更新*"}})
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": lines}})
     if blocks:
         blocks.append(
@@ -749,360 +644,549 @@ def _build_slack_payload(
                 "elements": [
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "月間カレンダーを開く"},
+                        "text": {"type": "plain_text", "text": "カレンダーを開く"},
                         "url": settings.target_url,
                     }
                 ],
             }
         )
-    if settings.ping_channel:
-        mention_block = {"type": "section", "text": {"type": "mrkdwn", "text": "<!channel>"}}
-        blocks.insert(0, mention_block)
-    return {"text": text, "blocks": blocks} if blocks else {"text": text}
+    return blocks
 
 
-def notify_slack(payload: Dict[str, Any], fallback_text: str, settings: Settings) -> None:
-    """Send notification to Slack with fallback to text-only payload."""
-
-    if not settings.slack_webhook_url:
-        LOGGER.warning("SLACK_WEBHOOK_URL not set. Skipping Slack notification. Message:\n%s", fallback_text)
+def notify_slack(payload: Dict[str, Any], settings: Settings) -> None:
+    webhook = settings.slack_webhook_url
+    if not webhook:
+        LOGGER.info("SLACK_WEBHOOK_URL is not configured; skipping Slack notification")
+        LOGGER.debug("Slack payload: %s", payload)
         return
-    fallback_attempted = False
     try:
-        response = requests.post(settings.slack_webhook_url, json=payload, timeout=10)
-        if response.status_code >= 400 and "blocks" in payload:
-            LOGGER.error("Slack responded with %s. Falling back to text payload.", response.status_code)
-            fallback_attempted = True
-            requests.post(settings.slack_webhook_url, json={"text": fallback_text}, timeout=10)
+        response = requests.post(webhook, json=payload, timeout=10)
         response.raise_for_status()
-    except Exception as exc:  # pragma: no cover
+        LOGGER.info("Slack notification sent. status=%s", response.status_code)
+    except Exception as exc:  # pragma: no cover - network variability
         LOGGER.error("Slack notification failed: %s", exc)
-        if "blocks" in payload and not fallback_attempted:
-            try:
-                requests.post(settings.slack_webhook_url, json={"text": fallback_text}, timeout=10)
-            except Exception as fallback_exc:  # pragma: no cover
-                LOGGER.error("Slack fallback notification failed: %s", fallback_exc)
 
 
-def diff_changes(
-    prev_days: Dict[str, Any],
-    curr_stats: Sequence[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Return tuples of changed counts, newly met, and status changes."""
+def _bin_value(value: int, bands: Sequence[Tuple[int, Optional[int], str]]) -> str:
+    for low, high, label in bands:
+        if high is None and value >= low:
+            return label
+        if high is not None and low <= value <= high:
+            return label
+    return bands[-1][2]
 
-    changed_counts: List[Dict[str, Any]] = []
-    newly_met: List[Dict[str, Any]] = []
-    meets_changed: List[Dict[str, Any]] = []
 
-    for entry in curr_stats:
-        if not entry.get("considered", True):
-            LOGGER.debug(
-                "Skipping business day %s for diff calculations (considered=False).",
-                entry.get("business_day"),
-            )
+def _bin_ratio(value: float, bands: Sequence[Tuple[float, Optional[float], str]]) -> str:
+    for low, high, label in bands:
+        if high is None and value >= low:
+            return label
+        if high is not None and low <= value <= high:
+            return label
+    return bands[-1][2]
+
+
+def mask_entry(entry: DailyEntry, mask_level: int) -> Dict[str, str]:
+    if mask_level <= 1:
+        return {
+            "single": _bin_value(entry.single_female, MASK_COUNT_BANDS),
+            "female": _bin_value(entry.female, MASK_COUNT_BANDS),
+            "total": _bin_value(entry.total, MASK_TOTAL_BANDS),
+            "ratio": _bin_ratio(entry.ratio, MASK_RATIO_BANDS),
+        }
+    # level 2 -> coarse labels
+    single_index = min(len(MASK_LEVEL2_WORDS["single"]) - 1, entry.single_female // 3)
+    female_index = min(len(MASK_LEVEL2_WORDS["female"]) - 1, entry.female // 4)
+    ratio_index = min(len(MASK_LEVEL2_WORDS["ratio"]) - 1, int(entry.ratio * 5))
+    total_index = min(len(MASK_LEVEL2_WORDS["total"]) - 1, entry.total // 15)
+    return {
+        "single": MASK_LEVEL2_WORDS["single"][single_index],
+        "female": MASK_LEVEL2_WORDS["female"][female_index],
+        "ratio": MASK_LEVEL2_WORDS["ratio"][ratio_index],
+        "total": MASK_LEVEL2_WORDS["total"][total_index],
+    }
+
+
+def load_state(reference_date: date) -> Dict[str, Any]:
+    if STATE_PATH.exists():
+        try:
+            raw = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            LOGGER.error("Failed to decode state.json: %s", exc)
+            raw = {"etag": None, "last_modified": None, "days": {}}
+    else:
+        raw = {"etag": None, "last_modified": None, "days": {}}
+    return upgrade_state_keys(raw, reference_date)
+
+
+def upgrade_state_keys(state: Dict[str, Any], reference_date: date) -> Dict[str, Any]:
+    days = state.get("days")
+    if not isinstance(days, dict):
+        state["days"] = {}
+        return state
+    upgraded: Dict[str, Any] = {}
+    for key, value in days.items():
+        if isinstance(key, str) and DATE_KEY_PATTERN.match(key):
+            upgraded[key] = value
             continue
-        key = entry.get("business_day") or str(entry.get("day"))
-        prev_raw = prev_days.get(key) if isinstance(prev_days, dict) else None
-        prev = prev_raw if isinstance(prev_raw, dict) else None
-        prev_meets = bool(prev.get("meets")) if prev else False
-        meets_now = bool(entry.get("meets"))
-        if prev is None and entry.get("total", 0) > 0:
-            changed_counts.append(entry)
-        elif prev and (
-            entry.get("male") != prev.get("male")
-            or entry.get("female") != prev.get("female")
-            or entry.get("total") != prev.get("total")
-            or entry.get("single_female") != prev.get("single_female")
-        ):
-            changed_counts.append(entry)
-        if not prev_meets and meets_now:
-            newly_met.append(entry)
-        if prev is None or prev_meets != meets_now:
-            meets_changed.append(entry)
-    return changed_counts, newly_met, meets_changed
+        if isinstance(key, str) and key.isdigit():
+            inferred = infer_entry_date(int(key), reference_date)
+            upgraded[inferred.isoformat()] = value
+            continue
+        LOGGER.debug("Dropping legacy state entry key=%s", key)
+    state["days"] = upgraded
+    return state
 
 
-def build_fallback_text(
-    newly_met: Sequence[Dict[str, Any]],
-    changed_counts: Sequence[Dict[str, Any]],
-    settings: Settings,
+def save_state(state: Dict[str, Any]) -> None:
+    tmp = STATE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(STATE_PATH)
+    LOGGER.debug("State saved to %s", STATE_PATH)
+
+
+def load_masked_history() -> Dict[str, Any]:
+    if HISTORY_MASKED_PATH.exists():
+        try:
+            return json.loads(HISTORY_MASKED_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            LOGGER.warning("history_masked.json is invalid; resetting")
+    return {"days": {}, "mask_level": DEFAULT_MASK_LEVEL}
+
+
+def save_masked_history(data: Dict[str, Any]) -> None:
+    HISTORY_MASKED_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    LOGGER.debug("history_masked.json updated")
+
+
+def check_robots_allow(settings: Settings) -> bool:
+    if not settings.robots_enforce:
+        return True
+    parsed = urlparse(settings.target_url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    try:
+        response = requests.get(robots_url, timeout=10)
+        if response.status_code >= 400:
+            LOGGER.warning("robots.txt unavailable (%s); skipping enforcement", response.status_code)
+            return True
+        disallow_paths: List[str] = []
+        current_agent: Optional[str] = None
+        for line in response.text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.lower().startswith("user-agent"):
+                _, agent = line.split(":", 1)
+                current_agent = agent.strip()
+            elif line.lower().startswith("disallow") and current_agent in {"*", DEFAULT_USER_AGENT_ID}:
+                _, path = line.split(":", 1)
+                disallow_paths.append(path.strip())
+        path = parsed.path or "/"
+        for disallow in disallow_paths:
+            if not disallow:
+                continue
+            if path.startswith(disallow):
+                LOGGER.warning("robots.txt disallows path=%s; skipping fetch", path)
+                return False
+        return True
+    except Exception as exc:  # pragma: no cover
+        LOGGER.warning("robots enforcement failed (%s); proceeding cautiously", exc)
+        return True
+
+
+async def fetch_calendar_html(settings: Settings) -> Tuple[str, str]:
+    LOGGER.info("Fetching calendar HTML from %s", settings.target_url)
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        headers = {"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"}
+        user_agent = DEFAULT_UA
+        if settings.ua_contact:
+            user_agent = f"{user_agent} {DEFAULT_USER_AGENT_ID} (+{settings.ua_contact})"
+        context = await browser.new_context(locale="ja-JP", user_agent=user_agent, extra_http_headers=headers)
+        page = await context.new_page()
+        await page.goto(settings.target_url, wait_until="domcontentloaded", timeout=60_000)
+
+        async def extract_from_frame(frame) -> Optional[str]:
+            try:
+                return await frame.evaluate(
+                    "() => { const table = document.querySelector(\"table[border='2']\"); return table ? table.outerHTML : null; }"
+                )
+            except Exception as exc:  # pragma: no cover
+                LOGGER.debug("Frame extraction failed (%s): %s", getattr(frame, "url", ""), exc)
+                return None
+
+        table_html: Optional[str] = await extract_from_frame(page.main_frame)
+        source_url = page.main_frame.url or settings.target_url
+        if not table_html:
+            for frame in page.frames:
+                if frame is page.main_frame:
+                    continue
+                table_html = await extract_from_frame(frame)
+                if table_html:
+                    source_url = frame.url or source_url
+                    break
+        if table_html:
+            digest = hashlib.sha256(table_html.encode("utf-8", "ignore")).hexdigest()
+            LOGGER.info("Fetched table outerHTML from frame=%s sha256=%s length=%d", source_url, digest, len(table_html))
+            await context.close()
+            await browser.close()
+            return table_html, source_url
+
+        html = await page.content()
+        digest = hashlib.sha256(html.encode("utf-8", "ignore")).hexdigest()
+        LOGGER.info("Fetched full page content sha256=%s length=%d", digest, len(html))
+        await context.close()
+        await browser.close()
+        return html, source_url
+
+
+def sanitize_html(html: str) -> str:
+    safe_chars = set("0123456789♂♀<>/\n\r\t =\"'()-:_;,.#")
+    sanitized_chars: List[str] = []
+    for ch in html:
+        if ch in safe_chars:
+            sanitized_chars.append(ch)
+        elif ch.isspace():
+            sanitized_chars.append(" ")
+        elif ch in {"・", "~", "〜"}:
+            sanitized_chars.append(ch)
+        else:
+            sanitized_chars.append("□")
+    return "".join(sanitized_chars)
+
+
+def _filter_entries_for_notifications(
+    entries: Sequence[DailyEntry],
     *,
-    stage_notifications: Optional[Sequence[Dict[str, Any]]] = None,
-) -> str:
-    lines: List[str] = []
-    stage_notifications = list(stage_notifications or [])
-    if stage_notifications:
-        lines.append("【基準達成通知】")
-        lines.extend(
-            f"- {_format_stage_notification(entry, markdown=False)}"
-            for entry in stage_notifications
-        )
-    if newly_met:
-        lines.append("【新規で条件を満たした日】")
-        lines.extend(
-            f"- {_format_entry(entry, markdown=False)}" for entry in newly_met
-        )
-    if changed_counts:
-        lines.append("【人数が更新された日】")
-        lines.extend(
-            f"- {_format_entry(entry, include_male=True, markdown=False)}"
-            for entry in changed_counts
-        )
-    lines.append(f"URL: {settings.target_url}")
-    text = "\n".join(lines)
-    if settings.ping_channel:
-        text = f"<!channel> {text}"
-    return text
+    logical_today: date,
+    notify_from_today: int,
+    ignore_older_than: int,
+) -> List[DailyEntry]:
+    filtered: List[DailyEntry] = []
+    cutoff = logical_today - timedelta(days=ignore_older_than)
+    for entry in entries:
+        if entry.business_day < cutoff:
+            continue
+        if notify_from_today and entry.business_day < logical_today:
+            continue
+        filtered.append(entry)
+    return filtered
 
 
-def _summary_lines(stats: Sequence[Dict[str, Any]]) -> str:
-    return "\n".join(
-        _format_entry(entry, include_male=True, markdown=False)
-        for entry in sorted(stats, key=lambda item: item.get("business_day"))[:10]
+def _date_key(target: date) -> str:
+    return target.isoformat()
+
+
+def _merge_state_counts(state_entry: Dict[str, Any], entry: DailyEntry) -> None:
+    state_entry["counts"] = {
+        "male": entry.male,
+        "female": entry.female,
+        "single_female": entry.single_female,
+        "total": entry.total,
+        "ratio": entry.ratio,
+    }
+    state_entry["met"] = bool(entry.meets)
+
+
+def process_notifications(
+    entries: Sequence[DailyEntry],
+    *,
+    settings: Settings,
+    logical_today: date,
+    state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    now_ts = int(time.time())
+    state = state if state is not None else load_state(logical_today)
+    days_state = state.setdefault("days", {})
+
+    filtered = _filter_entries_for_notifications(
+        entries,
+        logical_today=logical_today,
+        notify_from_today=settings.notify_from_today,
+        ignore_older_than=settings.ignore_older_than,
     )
 
+    stage_notifications: List[Tuple[DailyEntry, str]] = []
+    newly_met: List[DailyEntry] = []
+    changed_counts: List[DailyEntry] = []
 
-def log_parsing_snapshot(stats: Sequence[Dict[str, Any]], logical_today: date) -> None:
-    days = [entry.get("day") for entry in stats]
-    if days:
-        LOGGER.debug("[DEBUG] days_coverage: count=%d min=%s max=%s", len(days), min(days), max(days))
-    else:
-        LOGGER.debug("[DEBUG] days_coverage: count=0 min=None max=None")
-    preview_first = [
-        f"{entry.get('business_day')} 単女{entry.get('single_female', 0)} 女{entry.get('female', 0)} "
-        f"男{entry.get('male', 0)} 全{entry.get('total', 0)} ({int(entry.get('ratio', 0.0) * 100)}%)"
-        for entry in stats[:10]
-    ]
-    preview_last = [
-        f"{entry.get('business_day')} 単女{entry.get('single_female', 0)} 女{entry.get('female', 0)} "
-        f"男{entry.get('male', 0)} 全{entry.get('total', 0)} ({int(entry.get('ratio', 0.0) * 100)}%)"
-        for entry in stats[-5:]
-    ]
-    LOGGER.debug("[DEBUG] parsed first days: %s", preview_first)
-    LOGGER.debug("[DEBUG] parsed last days: %s", preview_last)
-
-    latest_nonzero = None
-    for entry in reversed(stats):
-        entry_date = entry.get("date")
-        if entry_date and entry_date.month == logical_today.month and entry.get("total", 0) > 0:
-            latest_nonzero = (
-                f"{entry.get('business_day')} {entry.get('dow')} total={entry.get('total', 0)} "
-                f"female={entry.get('female', 0)} single={entry.get('single_female', 0)} "
-                f"ratio={entry.get('ratio', 0.0):.2f}"
-            )
-            break
-    LOGGER.debug("[DEBUG] latest_nonzero: %s", latest_nonzero or "なし")
-
-
-def run_notifications(
-    stats: Sequence[Dict[str, Any]],
-    changed_counts: Sequence[Dict[str, Any]],
-    newly_met: Sequence[Dict[str, Any]],
-    settings: Settings,
-    *,
-    stage_notifications: Sequence[Dict[str, Any]] = (),
-) -> None:
-    """Send Slack notifications based on notify mode and debug flags."""
-
-    stage_notifications = list(stage_notifications)
-    if stage_notifications:
-        stage_days = {entry.get("business_day") for entry in stage_notifications}
-        filtered_newly = [
-            entry for entry in newly_met if entry.get("business_day") not in stage_days
-        ]
-        include_changed = changed_counts if settings.notify_mode == "changed" else []
-        fallback_text = build_fallback_text(
-            filtered_newly,
-            include_changed,
-            settings,
-            stage_notifications=stage_notifications,
-        )
-        payload = _build_slack_payload(
-            fallback_text,
-            filtered_newly,
-            include_changed,
-            settings,
-            stage_notifications=stage_notifications,
-        )
-        notify_slack(payload, fallback_text, settings)
-        return
-
-    if settings.notify_mode == "newly":
-        if newly_met:
-            fallback_text = build_fallback_text(newly_met, [], settings)
-            payload = _build_slack_payload(fallback_text, newly_met, [], settings)
-            notify_slack(payload, fallback_text, settings)
-        else:
-            LOGGER.info("No newly satisfied days. Skipping notification.")
-    else:  # changed mode
-        if newly_met or changed_counts:
-            fallback_text = build_fallback_text(newly_met, changed_counts, settings)
-            payload = _build_slack_payload(
-                fallback_text, newly_met, changed_counts, settings
-            )
-            notify_slack(payload, fallback_text, settings)
-        else:
-            LOGGER.info("No changes detected for notification.")
-
-    if settings.debug_summary:
-        summary_text = "【デバッグサマリー（上位10日）】\n" + _summary_lines(stats)
-        payload = {
-            "text": f"{'<!channel> ' if settings.ping_channel else ''}{summary_text}",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"{'<!channel> ' if settings.ping_channel else ''}*デバッグサマリー（上位10日）*",
-                    },
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "\n".join(
-                            f"• {_format_entry(entry, include_male=True)}" for entry in stats[:10]
-                        ),
-                    },
-                },
-            ],
-        }
-        notify_slack(payload, summary_text, settings)
-
-
-async def run() -> int:
-    """Entry point for the watcher."""
-
-    settings = SETTINGS
-    now_jst = datetime.now(tz=JST)
-    logical_today = derive_business_day(now_jst, settings.rollover_hours)
-    state = load_state(logical_today)
-
-    skip, headers = should_skip_by_http_headers(settings, state)
-    if skip:
-        LOGGER.info("Skipping fetch due to matching ETag/Last-Modified.")
-        return 0
-
-    delay = 1.0
-    html = ""
-    for attempt in range(3):
-        try:
-            html = await fetch_calendar_html(settings)
-            break
-        except Exception as exc:
-            LOGGER.error("Fetch attempt %s failed: %s", attempt + 1, exc)
-            if attempt == 2:
-                fallback_text = f"[ERROR] fetch failed: {exc}"
-                notify_slack({"text": fallback_text}, fallback_text, settings)
-                return 1
-            time.sleep(delay)
-            delay = delay * 2 + 1
-    else:
-        return 1
-
-    if os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch":
-        Path("fetched_table.html").write_text(html, encoding="utf-8")
-        LOGGER.info("Saved fetched_table.html for workflow_dispatch run.")
-
-    parsed_stats = parse_day_entries(html, settings, reference_date=logical_today)
-    log_parsing_snapshot(parsed_stats, logical_today)
-    stats = evaluate_conditions(parsed_stats, settings)
-    LOGGER.info("Parsed %d day entries.", len(stats))
-    LOGGER.debug("Stats preview: %s", stats[:10])
-
-    prev_days = state.get("days", {}) if isinstance(state, dict) else {}
-    changed_counts, newly_met, meets_changed = diff_changes(prev_days, stats)
-
-    now_ts = int(time.time())
-    cooldown_seconds = max(0, settings.cooldown_minutes) * 60
-    stage_notifications: List[Dict[str, Any]] = []
-    new_days: Dict[str, Any] = {}
-
-    ignore_threshold = settings.ignore_older_than
-
-    for entry in stats:
-        entry_date = entry.get("date")
-        if not isinstance(entry_date, date):
-            continue
-        diff_days = (logical_today - entry_date).days
-        if diff_days < 0:
-            LOGGER.debug(
-                "Skipping %s (future business day). logical_today=%s", entry.get("business_day"), logical_today
-            )
-            continue
-        if ignore_threshold > 0 and diff_days >= ignore_threshold:
-            LOGGER.debug(
-                "Skipping %s due to IGNORE_OLDER_THAN=%s (diff_days=%s)",
-                entry.get("business_day"),
-                ignore_threshold,
-                diff_days,
-            )
-            continue
-        key = entry.get("business_day")
-        prev_raw = prev_days.get(key) if isinstance(prev_days, dict) else None
-        prev_dict = prev_raw if isinstance(prev_raw, dict) else None
-        prev_stage = _coerce_stage(prev_dict.get("stage")) if prev_dict else "none"
-        prev_last = _coerce_last_notified(prev_dict.get("last_notified_at")) if prev_dict else None
+    for entry in filtered:
+        key = _date_key(entry.business_day)
+        prev_state = days_state.get(key, {})
         action, stage, last_notified = evaluate_stage_transition(
             entry,
-            prev_dict,
+            prev_state,
             now_ts=now_ts,
-            cooldown_seconds=cooldown_seconds,
+            cooldown_seconds=settings.cooldown_minutes * 60,
             bonus_single_delta=settings.bonus_single_delta,
             bonus_ratio_threshold=settings.bonus_ratio_threshold,
         )
-        if LOGGER.isEnabledFor(logging.DEBUG):
-            LOGGER.debug(
-                "Stage[%s] %s -> %s action=%s last_notified_at=%s single=%s ratio=%.3f",
-                key,
-                prev_stage,
-                stage,
-                action,
-                last_notified,
-                entry.get("single_female", 0),
-                entry.get("ratio", 0.0),
-            )
+        previous_met = bool(prev_state.get("met"))
+        counts_before = prev_state.get("counts")
+
+        state_entry = dict(prev_state)
+        _merge_state_counts(state_entry, entry)
+        state_entry["stage"] = stage
+        state_entry["last_notified_at"] = last_notified
+        days_state[key] = state_entry
+
         if action:
-            stage_entry = dict(entry)
-            stage_entry["notification_type"] = action
-            stage_notifications.append(stage_entry)
+            stage_notifications.append((entry, action))
+        if entry.meets and not previous_met:
+            newly_met.append(entry)
+        if entry.meets and settings.notify_mode == "changed" and counts_before:
+            if (
+                counts_before.get("female") != entry.female
+                or counts_before.get("single_female") != entry.single_female
+                or counts_before.get("total") != entry.total
+            ):
+                changed_counts.append(entry)
 
-        new_days[key] = {
-            "male": entry["male"],
-            "female": entry["female"],
-            "single_female": entry.get("single_female", 0),
-            "total": entry["total"],
-            "ratio": entry["ratio"],
-            "meets": entry["meets"],
-            "dow": entry.get("dow") or entry.get("dow_en"),
-            "dow_en": entry.get("dow_en") or entry.get("dow"),
-            "considered": entry["considered"],
-            "required_single_female": entry.get("required_single_female"),
-            "ratio_threshold": entry.get("ratio_threshold"),
-            "stage": stage,
-            "last_notified_at": last_notified if last_notified is not None else prev_last,
-        }
-
-    state.update({"etag": headers.get("etag"), "last_modified": headers.get("last_modified"), "days": new_days})
     save_state(state)
 
-    run_notifications(
-        stats,
-        changed_counts,
-        newly_met,
-        settings,
-        stage_notifications=stage_notifications,
-    )
+    if not (stage_notifications or newly_met or changed_counts):
+        LOGGER.info("No notifications to send for logical_today=%s", logical_today)
+        return state
 
-    LOGGER.info(
-        "Notification summary: changed=%d newly_met=%d status_changed=%d",
-        len(changed_counts),
-        len(newly_met),
-        len(meets_changed),
-    )
-    return 0
+    fallback = build_fallback_text(stage_notifications, newly_met, changed_counts, logical_today)
+    blocks = _build_slack_blocks(stage_notifications, newly_met, changed_counts, logical_today, settings)
+    payload = {"text": fallback, "blocks": blocks or None}
+    if settings.ping_channel and not blocks:
+        payload["text"] = f"<!channel> {payload['text']}"
+    notify_slack(payload, settings)
+    return state
 
 
-if __name__ == "__main__":  # pragma: no cover - CLI entry
-    _configure_logging()
-    raise SystemExit(asyncio.run(run()))
+def _summary_stats(values: Sequence[float]) -> Dict[str, float]:
+    if not values:
+        return {"avg": 0.0, "median": 0.0, "max": 0.0}
+    return {
+        "avg": round(sum(values) / len(values), 2),
+        "median": round(statistics.median(values), 2),
+        "max": round(max(values), 2),
+    }
+
+
+def select_summary_bundle(entries: Sequence[DailyEntry], *, logical_today: date, days: int) -> SummaryBundle:
+    start = logical_today - timedelta(days=days - 1)
+    period_days = [entry for entry in entries if start <= entry.business_day <= logical_today]
+    prev_start = start - timedelta(days=days)
+    prev_end = start - timedelta(days=1)
+    previous_days = [entry for entry in entries if prev_start <= entry.business_day <= prev_end]
+    label = f"過去{days}日" if days != 30 else "過去30日"
+    return SummaryBundle(label, period_days, previous_days)
+
+
+def _weekday_profile(entries: Sequence[DailyEntry]) -> str:
+    groups: Dict[str, List[DailyEntry]] = {dow: [] for dow in DOW_EN}
+    for entry in entries:
+        groups[entry.dow_en].append(entry)
+    summary_parts: List[str] = []
+    for dow in DOW_EN:
+        if not groups[dow]:
+            continue
+        avg_single = sum(e.single_female for e in groups[dow]) / len(groups[dow])
+        avg_ratio = sum(e.ratio for e in groups[dow]) / len(groups[dow])
+        summary_parts.append(
+            f"{DOW_JP[dow]}: 単女{avg_single:.1f} / 比率{avg_ratio*100:.1f}%"
+        )
+    return "、".join(summary_parts) if summary_parts else "データ不足"
+
+
+def _format_hot_day(entry: DailyEntry, logical_today: date) -> str:
+    percent = int(round(entry.ratio * 100))
+    label = _format_business_label(entry.business_day, logical_today)
+    return f"{label} 単女{entry.single_female} 女{entry.female}/全{entry.total} ({percent}%)"
+
+
+def generate_summary_payload(bundle: SummaryBundle, *, logical_today: date, settings: Settings) -> Optional[Dict[str, Any]]:
+    if not bundle.period_days:
+        LOGGER.info("No entries available for summary period=%s", bundle.period_label)
+        return None
+
+    singles = [entry.single_female for entry in bundle.period_days]
+    females = [entry.female for entry in bundle.period_days]
+    ratios = [entry.ratio * 100 for entry in bundle.period_days]
+
+    single_stats = _summary_stats([float(x) for x in singles])
+    female_stats = _summary_stats([float(x) for x in females])
+    ratio_stats = _summary_stats([float(x) for x in ratios])
+
+    prev_single_avg = sum(entry.single_female for entry in bundle.previous_days) / len(bundle.previous_days) if bundle.previous_days else 0.0
+    prev_ratio_avg = (sum(entry.ratio for entry in bundle.previous_days) / len(bundle.previous_days)) * 100 if bundle.previous_days else 0.0
+    delta_single = single_stats["avg"] - prev_single_avg if bundle.previous_days else 0.0
+    delta_ratio = ratio_stats["avg"] - prev_ratio_avg if bundle.previous_days else 0.0
+
+    top_days = sorted(
+        bundle.period_days,
+        key=lambda e: (e.ratio, e.single_female, e.female, -abs((logical_today - e.business_day).days)),
+        reverse=True,
+    )[:3]
+
+    weekday_profile = _weekday_profile(bundle.period_days)
+
+    lines = [
+        f"*{bundle.period_label}サマリー*",
+        f"平均 単女{single_stats['avg']:.2f} / 女{female_stats['avg']:.2f} / 比率{ratio_stats['avg']:.2f}%",
+        f"中央値 単女{single_stats['median']:.2f} / 女{female_stats['median']:.2f} / 比率{ratio_stats['median']:.2f}%",
+        f"最大 単女{single_stats['max']:.2f} / 女{female_stats['max']:.2f} / 比率{ratio_stats['max']:.2f}%",
+        f"傾向: 単女平均 {delta_single:+.2f} / 比率平均 {delta_ratio:+.2f}pp",
+        "Hot 日 Top3:",
+    ]
+    lines.extend(f"• {_format_hot_day(entry, logical_today)}" for entry in top_days)
+    lines.append(f"曜日プロファイル: {weekday_profile}")
+    lines.append(f"解析対象日数: {len(bundle.period_days)} 日")
+
+    text = "\n".join(lines)
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ("<!channel> " if settings.ping_channel else "") + lines[0]},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(lines[1:])},
+        },
+    ]
+    if settings.ping_channel:
+        text = "<!channel> " + text
+    return {"text": text, "blocks": blocks}
+
+
+def update_masked_history(entries: Sequence[DailyEntry], *, settings: Settings) -> None:
+    history = load_masked_history()
+    history.setdefault("days", {})
+    history["mask_level"] = settings.mask_level
+    history["generated_at"] = datetime.now(tz=JST).isoformat()
+
+    for entry in entries:
+        key = _date_key(entry.business_day)
+        history["days"][key] = mask_entry(entry, settings.mask_level)
+
+    save_masked_history(history)
+
+
+def should_skip_by_http_headers(settings: Settings, prev_state: Dict[str, Any]) -> Tuple[bool, Dict[str, Optional[str]]]:
+    try:
+        response = requests.head(settings.target_url, timeout=10)
+        response.raise_for_status()
+        etag = response.headers.get("ETag")
+        last_modified = response.headers.get("Last-Modified")
+        same = False
+        if etag and prev_state.get("etag") and etag == prev_state.get("etag"):
+            same = True
+        if last_modified and prev_state.get("last_modified") and last_modified == prev_state.get("last_modified"):
+            same = True
+        LOGGER.info("HEAD check completed. skip=%s", same)
+        return same, {"etag": etag, "last_modified": last_modified}
+    except Exception as exc:  # pragma: no cover
+        LOGGER.warning("HEAD check failed: %s", exc)
+        return False, {"etag": None, "last_modified": None}
+
+
+def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> None:
+    if not check_robots_allow(settings):
+        LOGGER.warning("Fetch skipped due to robots.txt policy")
+        return
+
+    now = datetime.now(tz=JST)
+    logical_today = derive_business_day(now, settings.rollover_hours)
+    state = load_state(logical_today)
+    skip, header_info = should_skip_by_http_headers(settings, state)
+    state.update(header_info)
+    if skip:
+        LOGGER.info("Skipping fetch because headers indicate no change")
+        save_state(state)
+        return
+
+    html, _ = asyncio.run(fetch_calendar_html(settings))
+    if output_sanitized:
+        output_sanitized.write_text(sanitize_html(html), encoding="utf-8")
+        LOGGER.info("Sanitized HTML written to %s", output_sanitized)
+
+    entries = parse_day_entries(html, settings=settings, reference_date=logical_today)
+    log_parsing_snapshot(entries, logical_today)
+    process_notifications(entries, settings=settings, logical_today=logical_today, state=state)
+    update_masked_history(entries, settings=settings)
+
+
+def summary(settings: Settings, *, days: int, raw_output: Optional[Path] = None) -> None:
+    if not check_robots_allow(settings):
+        LOGGER.warning("Summary skipped due to robots.txt policy")
+        return
+
+    now = datetime.now(tz=JST)
+    logical_today = derive_business_day(now, settings.rollover_hours)
+    html, _ = asyncio.run(fetch_calendar_html(settings))
+    entries = parse_day_entries(html, settings=settings, reference_date=logical_today)
+    update_masked_history(entries, settings=settings)
+    bundle = select_summary_bundle(entries, logical_today=logical_today, days=days)
+
+    if raw_output:
+        raw_payload = {
+            "generated_at": datetime.now(tz=JST).isoformat(),
+            "period_label": bundle.period_label,
+            "days": [
+                {
+                    "date": entry.business_day.isoformat(),
+                    "single_female": entry.single_female,
+                    "female": entry.female,
+                    "male": entry.male,
+                    "total": entry.total,
+                    "ratio": entry.ratio,
+                }
+                for entry in bundle.period_days
+            ],
+            "previous_days": [
+                {
+                    "date": entry.business_day.isoformat(),
+                    "single_female": entry.single_female,
+                    "female": entry.female,
+                    "male": entry.male,
+                    "total": entry.total,
+                    "ratio": entry.ratio,
+                }
+                for entry in bundle.previous_days
+            ],
+        }
+        raw_output.write_text(json.dumps(raw_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        LOGGER.info("Summary raw dataset written to %s", raw_output)
+
+    payload = generate_summary_payload(bundle, logical_today=logical_today, settings=settings)
+    if payload:
+        notify_slack(payload, settings)
+    else:
+        LOGGER.info("No summary payload generated")
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Cheeks calendar monitor")
+    subparsers = parser.add_subparsers(dest="command", required=False)
+
+    monitor_parser = subparsers.add_parser("monitor", help="Run monitoring notifications")
+    monitor_parser.add_argument("--sanitized-output", type=Path, help="Path to save sanitized HTML")
+
+    summary_parser = subparsers.add_parser("summary", help="Send weekly/monthly summary")
+    summary_parser.add_argument("--days", type=int, choices=[7, 30], required=True, help="Summary window in days")
+    summary_parser.add_argument("--raw-output", type=Path, help="Path to store raw summary dataset")
+
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    configure_logging()
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    settings = load_settings()
+
+    if args.command in {None, "monitor"}:
+        sanitized_path = getattr(args, "sanitized_output", None)
+        monitor(settings, output_sanitized=sanitized_path)
+    elif args.command == "summary":
+        raw_output = getattr(args, "raw_output", None)
+        summary(settings, days=args.days, raw_output=raw_output)
+    else:  # pragma: no cover - argparse guards
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
