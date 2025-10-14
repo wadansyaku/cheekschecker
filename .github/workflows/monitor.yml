@@ -3,6 +3,10 @@ name: monitor-cheeks
 permissions:
   contents: write
 
+concurrency:
+  group: monitor-cheeks
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
   schedule:
@@ -42,6 +46,7 @@ jobs:
           TARGET_URL: http://cheeks.nagoya/yoyaku.shtml
           FEMALE_MIN: '3'
           FEMALE_RATIO_MIN: '0.3'
+          EXCLUDE_KEYWORDS: スタッフ,T-TIME,POLE,HALLOWEEN
         run: python watch_cheeks.py
 
       - name: Persist state
