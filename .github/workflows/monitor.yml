@@ -47,6 +47,8 @@ jobs:
           FEMALE_MIN: '3'
           FEMALE_RATIO_MIN: '0.3'
           EXCLUDE_KEYWORDS: スタッフ,T-TIME,POLE,HALLOWEEN
+          NOTIFY_MODE: 'newly'
+          COOLDOWN_MINUTES: '180'
         run: python watch_cheeks.py
 
       - name: Persist state

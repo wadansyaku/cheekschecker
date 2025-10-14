@@ -34,6 +34,7 @@ class Settings:
     include_dow: Tuple[str, ...]
     notify_mode: str
     debug_summary: bool
+    cooldown_minutes: int = 180
 
 
 FULLWIDTH_TO_ASCII = str.maketrans({
@@ -108,6 +109,15 @@ def load_settings() -> Settings:
 
     debug_summary = os.getenv("DEBUG_SUMMARY") == "1"
 
+    cooldown_default = "180"
+    cooldown_env = os.getenv("COOLDOWN_MINUTES", cooldown_default)
+    try:
+        cooldown_minutes = int(cooldown_env)
+    except (TypeError, ValueError):
+        LOGGER.warning("Invalid COOLDOWN_MINUTES=%s. Falling back to %s.", cooldown_env, cooldown_default)
+        cooldown_minutes = int(cooldown_default)
+    cooldown_minutes = max(0, cooldown_minutes)
+
     settings = Settings(
         target_url=target_url,
         slack_webhook_url=slack_webhook_url,
@@ -118,6 +128,7 @@ def load_settings() -> Settings:
         include_dow=include_dow,
         notify_mode=notify_mode,
         debug_summary=debug_summary,
+        cooldown_minutes=cooldown_minutes,
     )
     LOGGER.debug("Settings loaded: %s", settings)
     return settings
@@ -404,6 +415,76 @@ def evaluate_conditions(
     return evaluated
 
 
+def _coerce_stage(value: Any) -> str:
+    if isinstance(value, str):
+        lowered = value.lower()
+        if lowered in {"none", "initial", "bonus"}:
+            return lowered
+    return "none"
+
+
+def _coerce_last_notified(value: Any) -> Optional[int]:
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def evaluate_stage_transition(
+    entry: Dict[str, Any],
+    prev_state: Optional[Dict[str, Any]],
+    *,
+    now: int,
+    cooldown_seconds: int,
+) -> Tuple[Optional[str], str, Optional[int]]:
+    """Determine notification stage transitions and actions for a day."""
+
+    meets = bool(entry.get("meets"))
+    single = entry.get("single_female", 0)
+    ratio = entry.get("ratio", 0.0)
+    required_single = entry.get("required_single_female", 0) or 0
+
+    prev_stage = _coerce_stage(prev_state.get("stage")) if prev_state else "none"
+    prev_last_notified = _coerce_last_notified(prev_state.get("last_notified_at")) if prev_state else None
+
+    stage = prev_stage
+    last_notified = prev_last_notified
+    action: Optional[str] = None
+
+    if not meets:
+        stage = "none"
+        return action, stage, last_notified
+
+    bonus_by_single = single >= required_single + 2
+    bonus_by_ratio = ratio >= 0.50
+
+    if stage == "none":
+        action = "initial"
+        stage = "initial"
+        last_notified = now
+    elif stage == "initial":
+        if bonus_by_single or bonus_by_ratio:
+            action = "bonus"
+            stage = "bonus"
+            last_notified = now
+    elif stage == "bonus":
+        if last_notified is None or now - last_notified >= cooldown_seconds:
+            stage = "initial"
+        else:
+            # Cooldown in progress; stay silent.
+            stage = "bonus"
+    else:
+        stage = "initial"
+        action = "initial"
+        last_notified = now
+
+    return action, stage, last_notified
+
+
 def _format_entry(
     entry: Dict[str, Any],
     *,
@@ -425,13 +506,46 @@ def _format_entry(
     return f"{label}: {detail} ({percent}%)"
 
 
+def _format_stage_notification(
+    entry: Dict[str, Any],
+    *,
+    markdown: bool,
+) -> str:
+    label_map = {"initial": "初回", "bonus": "追加"}
+    notification_type = entry.get("notification_type", "")
+    label_text = label_map.get(notification_type, notification_type or "通知")
+    dow_value = entry.get("dow") or entry.get("dow_en")
+    day_label = f"{entry['day']}日({dow_value})"
+    if markdown:
+        day_label = f"*{day_label}*"
+    percent = int(round(entry.get("ratio", 0.0) * 100))
+    return (
+        f"{day_label}: [{label_text}] 単女{entry.get('single_female', 0)} "
+        f"女{entry.get('female', 0)}/全{entry.get('total', 0)} ({percent}%)"
+    )
+
+
 def _build_slack_payload(
     text: str,
     newly_met: Sequence[Dict[str, Any]],
     changed_counts: Sequence[Dict[str, Any]],
     settings: Settings,
+    stage_notifications: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     blocks: List[Dict[str, Any]] = []
+    stage_notifications = list(stage_notifications or [])
+    if stage_notifications:
+        lines = "\n".join(
+            f"• {_format_stage_notification(entry, markdown=True)}"
+            for entry in stage_notifications
+        )
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*基準達成通知*"},
+            }
+        )
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": lines}})
     if newly_met:
         lines = "\n".join(
             f"• {_format_entry(entry, markdown=True)}" for entry in newly_met
@@ -532,8 +646,17 @@ def build_fallback_text(
     newly_met: Sequence[Dict[str, Any]],
     changed_counts: Sequence[Dict[str, Any]],
     settings: Settings,
+    *,
+    stage_notifications: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> str:
     lines: List[str] = []
+    stage_notifications = list(stage_notifications or [])
+    if stage_notifications:
+        lines.append("【基準達成通知】")
+        lines.extend(
+            f"- {_format_stage_notification(entry, markdown=False)}"
+            for entry in stage_notifications
+        )
     if newly_met:
         lines.append("【新規で条件を満たした日】")
         lines.extend(
@@ -561,8 +684,33 @@ def run_notifications(
     changed_counts: Sequence[Dict[str, Any]],
     newly_met: Sequence[Dict[str, Any]],
     settings: Settings,
+    *,
+    stage_notifications: Sequence[Dict[str, Any]] = (),
 ) -> None:
     """Send Slack notifications based on notify mode and debug flags."""
+
+    stage_notifications = list(stage_notifications)
+    if stage_notifications:
+        stage_days = {entry.get("day") for entry in stage_notifications}
+        filtered_newly = [
+            entry for entry in newly_met if entry.get("day") not in stage_days
+        ]
+        include_changed = changed_counts if settings.notify_mode == "changed" else []
+        fallback_text = build_fallback_text(
+            filtered_newly,
+            include_changed,
+            settings,
+            stage_notifications=stage_notifications,
+        )
+        payload = _build_slack_payload(
+            fallback_text,
+            filtered_newly,
+            include_changed,
+            settings,
+            stage_notifications=stage_notifications,
+        )
+        notify_slack(payload, fallback_text, settings)
+        return
 
     if settings.notify_mode == "newly":
         if newly_met:
@@ -574,7 +722,9 @@ def run_notifications(
     else:  # changed mode
         if newly_met or changed_counts:
             fallback_text = build_fallback_text(newly_met, changed_counts, settings)
-            payload = _build_slack_payload(fallback_text, newly_met, changed_counts, settings)
+            payload = _build_slack_payload(
+                fallback_text, newly_met, changed_counts, settings
+            )
             notify_slack(payload, fallback_text, settings)
         else:
             LOGGER.info("No changes detected for notification.")
@@ -637,8 +787,42 @@ async def run() -> int:
     prev_days = state.get("days", {}) if isinstance(state, dict) else {}
     changed_counts, newly_met, meets_changed = diff_changes(prev_days, stats)
 
-    new_days = {
-        str(entry["day"]): {
+    now_ts = int(time.time())
+    cooldown_seconds = max(0, settings.cooldown_minutes) * 60
+    stage_notifications: List[Dict[str, Any]] = []
+    new_days: Dict[str, Any] = {}
+
+    for entry in stats:
+        key = str(entry["day"])
+        prev_raw = prev_days.get(key) if isinstance(prev_days, dict) else None
+        prev_dict = prev_raw if isinstance(prev_raw, dict) else None
+        prev_stage = _coerce_stage(prev_dict.get("stage")) if prev_dict else "none"
+        prev_last = (
+            _coerce_last_notified(prev_dict.get("last_notified_at")) if prev_dict else None
+        )
+        action, stage, last_notified = evaluate_stage_transition(
+            entry,
+            prev_dict,
+            now=now_ts,
+            cooldown_seconds=cooldown_seconds,
+        )
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug(
+                "Stage[%s] %s -> %s action=%s last_notified_at=%s single=%s ratio=%.3f",
+                key,
+                prev_stage,
+                stage,
+                action,
+                last_notified,
+                entry.get("single_female", 0),
+                entry.get("ratio", 0.0),
+            )
+        if action:
+            stage_entry = dict(entry)
+            stage_entry["notification_type"] = action
+            stage_notifications.append(stage_entry)
+
+        new_days[key] = {
             "male": entry["male"],
             "female": entry["female"],
             "single_female": entry.get("single_female", 0),
@@ -650,16 +834,19 @@ async def run() -> int:
             "considered": entry["considered"],
             "required_single_female": entry.get("required_single_female"),
             "ratio_threshold": entry.get("ratio_threshold"),
+            "stage": stage,
+            "last_notified_at": last_notified if last_notified is not None else prev_last,
         }
-        for entry in stats
-    }
     state.update({"etag": headers.get("etag"), "last_modified": headers.get("last_modified"), "days": new_days})
     save_state(state)
 
-    if settings.notify_mode == "newly":
-        run_notifications(stats, [], newly_met, settings)
-    else:
-        run_notifications(stats, changed_counts, newly_met, settings)
+    run_notifications(
+        stats,
+        changed_counts,
+        newly_met,
+        settings,
+        stage_notifications=stage_notifications,
+    )
 
     LOGGER.info(
         "Notification summary: changed=%d newly_met=%d status_changed=%d",
