@@ -1,8 +1,13 @@
 name: monitor-cheeks
+
+permissions:
+  contents: write
+
 on:
   schedule:
     - cron: "3,13,23,33,43,53 * * * *"   # UTC（JST+9）
   workflow_dispatch:
+
 jobs:
   run:
     runs-on: ubuntu-latest
