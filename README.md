@@ -3,10 +3,12 @@
 月間カレンダー（http://cheeks.nagoya/yoyaku.shtml）から参加者を取得し、女性比率がしきい値を満たした日に Slack 通知を送る監視スクリプトです。Playwright でページを取得し、BeautifulSoup で HTML を解析します。
 
 ## 判定ロジック概要
-- 参加者文字列中の `♂` / `♀` の出現回数で男女数をカウントします。
-- 女性人数が `FEMALE_MIN` 以上、かつ女性比率（female / total）が `FEMALE_RATIO_MIN` 以上のとき成立とみなします。
+- 参加者行ごとに `♂` / `♀` の記号を数え、さらに `×2` や `2人` などの数詞を読み取って女性人数を補正します（♀と数詞が同じ行にあり、♂が含まれない場合のみ数詞を採用）。
+- 女性1名のみを示す行を「単女」と定義し、日毎に `male`, `female`, `single_female` を集計します（♀1・♂0・数詞≦1 の行を単女とみなします）。
+- 判定は曜日別に行います。金曜・土曜は「単女≧5 かつ 女性比≧40%」、日曜〜木曜は「単女≧3 かつ 女性比≧40%」が成立条件です。`FEMALE_MIN` を設定している場合はその値も下限として併用します。
+- 女性比率のしきい値は `max(0.40, FEMALE_RATIO_MIN)` で計算します。
 - `MIN_TOTAL` を設定すると合計人数がしきい値未満の行は不成立になります。
-- `EXCLUDE_KEYWORDS` に含まれる語を含む行は参加者計算から除外します。
+- `EXCLUDE_KEYWORDS` に含まれる語を含む行は参加者計算から除外しますが、「スタッフ」は常にカウント対象です。
 - `INCLUDE_DOW` を指定した場合は対象曜日のセルのみ判定します（Sun..Sat）。
 - 曜日はテーブル内の列位置（0=Sun〜6=Sat）で判断します。
 
@@ -21,9 +23,9 @@ Slack には [Incoming Webhooks](https://api.slack.com/messaging/webhooks) の U
 | `TARGET_URL` | `http://cheeks.nagoya/yoyaku.shtml` | 監視対象のURL |
 | `SLACK_WEBHOOK_URL` | なし | Slack Incoming Webhook URL |
 | `FEMALE_MIN` | `3` | 成立に必要な女性人数 |
-| `FEMALE_RATIO_MIN` | `0.3` | 成立に必要な女性比率 |
+| `FEMALE_RATIO_MIN` | `0.3` | 成立に必要な女性比率（実際の下限は `max(0.40, FEMALE_RATIO_MIN)`） |
 | `MIN_TOTAL` | 未設定 | 合計人数の下限（設定すると有効） |
-| `EXCLUDE_KEYWORDS` | 未設定 | カンマ区切りの除外キーワード（例：`スタッフ,T-TIME,POLE`） |
+| `EXCLUDE_KEYWORDS` | 未設定 | カンマ区切りの除外キーワード（例：`スタッフ,T-TIME,POLE`。`スタッフ` は自動的に除外対象外） |
 | `INCLUDE_DOW` | 未設定 | 判定対象の曜日（カンマ区切り、Sun..Sat） |
 | `NOTIFY_MODE` | `newly` | `newly`（新規成立のみ通知）/`changed`（人数変化と新規成立を通知） |
 | `DEBUG_LOG` | 未設定 | `1` で DEBUG ログを出力 |

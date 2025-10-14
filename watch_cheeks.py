@@ -36,6 +36,23 @@ class Settings:
     debug_summary: bool
 
 
+FULLWIDTH_TO_ASCII = str.maketrans({
+    "０": "0",
+    "１": "1",
+    "２": "2",
+    "３": "3",
+    "４": "4",
+    "５": "5",
+    "６": "6",
+    "７": "7",
+    "８": "8",
+    "９": "9",
+})
+
+MULTIPLIER_PATTERN = re.compile(r"[×xX＊*]\s*(\d+)")
+GROUP_COUNT_PATTERN = re.compile(r"([0-9０-９]+)\s*(?:人|名|組)")
+
+
 def _configure_logging() -> None:
     """Initialise logging based on DEBUG_LOG flag."""
     level = logging.DEBUG if os.getenv("DEBUG_LOG") == "1" else logging.INFO
@@ -213,6 +230,52 @@ async def fetch_calendar_html(settings: Settings) -> str:
             await browser.close()
 
 
+def _should_exclude_text(text: str, keywords: Sequence[str]) -> bool:
+    """Return True if the text should be excluded based on keywords."""
+
+    lowered = text.lower()
+    for keyword in keywords:
+        if not keyword:
+            continue
+        if "スタッフ" in keyword or "staff" in keyword:
+            continue
+        if keyword in lowered:
+            return True
+    return False
+
+
+def _extract_numeric_counts(text: str) -> List[int]:
+    """Extract numeric counts referenced within a participant description."""
+
+    counts: List[int] = []
+    for match in MULTIPLIER_PATTERN.finditer(text):
+        try:
+            counts.append(int(match.group(1)))
+        except (TypeError, ValueError):
+            continue
+    for match in GROUP_COUNT_PATTERN.finditer(text):
+        digits = match.group(1).translate(FULLWIDTH_TO_ASCII)
+        try:
+            counts.append(int(digits))
+        except ValueError:
+            continue
+    return counts
+
+
+def _count_participant_line(text: str) -> Tuple[int, int, int]:
+    """Return the male, female and single female counts for a single line."""
+
+    male_count = text.count("♂")
+    female_symbol_count = text.count("♀")
+    numbers = _extract_numeric_counts(text)
+    female_count = female_symbol_count
+    if female_symbol_count > 0 and male_count == 0:
+        female_count = max(female_symbol_count, max(numbers) if numbers else female_symbol_count)
+    numeric_value = max(numbers) if numbers else female_count
+    single = 1 if female_count == 1 and male_count == 0 and numeric_value <= 1 else 0
+    return male_count, female_count, single
+
+
 def parse_day_entries(html: str, settings: Optional[Settings] = None) -> List[Dict[str, Any]]:
     """Parse the calendar HTML and extract daily participation entries."""
 
@@ -230,66 +293,73 @@ def parse_day_entries(html: str, settings: Optional[Settings] = None) -> List[Di
             scope_hint = "document"
     LOGGER.debug("Parsing day entries using scope: %s", scope_hint)
 
-    cells = table.find_all("td", attrs={"valign": "top"}) if hasattr(table, "find_all") else []
     results: List[Dict[str, Any]] = []
-    exclude_keywords = cfg.exclude_keywords
+    rows = table.find_all("tr") if hasattr(table, "find_all") else []
 
-    for idx, td in enumerate(cells):
-        centers = td.find_all("center")
-        if not centers:
-            continue
-
-        day_text = centers[0].get_text(strip=True)
-        if not day_text:
-            continue
-        match = re.search(r"\d+", day_text)
-        if not match:
-            continue
-        day = int(match.group())
-
-        participant_parent = None
-        if len(centers) >= 3:
-            participant_parent = centers[2]
-        elif len(centers) >= 2:
-            participant_parent = centers[1]
-
-        fonts = participant_parent.find_all("font") if participant_parent else []
-        if not fonts:
-            fonts = td.find_all("font")
-
-        texts: List[str] = []
-        for font in fonts:
-            text = font.get_text(strip=True)
-            if not text:
+    for row in rows:
+        columns = [td for td in row.find_all("td") if td.get("valign", "").lower() == "top"]
+        for col_index, td in enumerate(columns):
+            centers = td.find_all("center")
+            if not centers:
                 continue
-            texts.append(text)
 
-        male = 0
-        female = 0
-        valid_texts: List[str] = []
-        for text in texts:
-            lowered = text.lower()
-            if any(keyword in lowered for keyword in exclude_keywords):
-                LOGGER.debug("Excluded text '%s' for day %s due to keyword filter.", text, day)
+            day_text = centers[0].get_text(strip=True)
+            if not day_text:
                 continue
-            male += text.count("♂")
-            female += text.count("♀")
-            valid_texts.append(text)
+            match = re.search(r"\d+", day_text)
+            if not match:
+                continue
+            day = int(match.group())
 
-        total = male + female
-        ratio = (female / total) if total else 0.0
-        entry = {
-            "day": day,
-            "dow_index": idx % len(DOW_EN),
-            "dow_en": DOW_EN[idx % len(DOW_EN)],
-            "male": male,
-            "female": female,
-            "total": total,
-            "ratio": ratio,
-            "entries": valid_texts,
-        }
-        LOGGER.debug("Parsed entry: %s", entry)
-        results.append(entry)
+            participant_parent = None
+            if len(centers) >= 3:
+                participant_parent = centers[2]
+            elif len(centers) >= 2:
+                participant_parent = centers[1]
+
+            fonts = participant_parent.find_all("font") if participant_parent else []
+            if not fonts:
+                fonts = td.find_all("font")
+
+            male_total = 0
+            female_total = 0
+            single_total = 0
+            valid_texts: List[str] = []
+
+            for font in fonts:
+                text = font.get_text(strip=True)
+                if not text:
+                    continue
+                if _should_exclude_text(text, cfg.exclude_keywords):
+                    LOGGER.debug(
+                        "Excluded text '%s' for day %s due to keyword filter (スタッフ除外対象外).",
+                        text,
+                        day,
+                    )
+                    continue
+                male_count, female_count, single_count = _count_participant_line(text)
+                male_total += male_count
+                female_total += female_count
+                single_total += single_count
+                valid_texts.append(text)
+
+            dow = DOW_EN[col_index % len(DOW_EN)]
+            total = male_total + female_total
+            ratio = (female_total / total) if total else 0.0
+            entry = {
+                "day": day,
+                "dow_index": col_index % len(DOW_EN),
+                "dow": dow,
+                "dow_en": dow,
+                "male": male_total,
+                "female": female_total,
+                "single_female": single_total,
+                "total": total,
+                "ratio": ratio,
+                "entries": valid_texts,
+            }
+            LOGGER.debug("Parsed entry: %s", entry)
+            results.append(entry)
 
     results.sort(key=lambda item: item["day"])
     return results
@@ -303,36 +373,56 @@ def evaluate_conditions(
 
     cfg = settings or SETTINGS
     evaluated: List[Dict[str, Any]] = []
+    ratio_threshold = max(0.40, cfg.female_ratio_min)
     for entry in stats:
         considered = True
-        if cfg.include_dow and entry.get("dow_en") not in cfg.include_dow:
+        dow_value = entry.get("dow") or entry.get("dow_en")
+        if cfg.include_dow and dow_value not in cfg.include_dow:
             considered = False
         if cfg.min_total is not None and entry.get("total", 0) < cfg.min_total:
             considered = False
         ratio = entry.get("ratio", 0.0)
+        required_single = 5 if dow_value in {"Fri", "Sat"} else 3
+        female_total = entry.get("female", 0)
+        single_total = entry.get("single_female", 0)
         meets = (
             considered
-            and entry.get("female", 0) >= cfg.female_min
             and entry.get("total", 0) > 0
-            and ratio >= cfg.female_ratio_min
+            and single_total >= required_single
+            and female_total >= max(cfg.female_min, required_single)
+            and ratio >= ratio_threshold
         )
         updated = dict(entry)
         updated["ratio"] = round(ratio, 3)
+        updated["dow"] = dow_value
         updated["considered"] = considered
         updated["meets"] = meets
+        updated["required_single_female"] = required_single
+        updated["ratio_threshold"] = ratio_threshold
         evaluated.append(updated)
         LOGGER.debug("Evaluated entry: %s", updated)
     return evaluated
 
 
-def _format_entry(entry: Dict[str, Any], include_male: bool = False) -> str:
-    percent = round(entry.get("ratio", 0.0) * 100)
-    base = f"{entry['day']}日({entry['dow_en']})"
+def _format_entry(
+    entry: Dict[str, Any],
+    *,
+    include_male: bool = False,
+    markdown: bool = True,
+) -> str:
+    """Return a human-readable representation of the entry."""
+
+    percent = int(round(entry.get("ratio", 0.0) * 100))
+    dow_value = entry.get("dow") or entry.get("dow_en")
+    label = f"{entry['day']}日({dow_value})"
+    if markdown:
+        label = f"*{label}*"
+    components = [f"単女{entry.get('single_female', 0)}", f"女{entry.get('female', 0)}"]
     if include_male:
-        base += f": 男{entry['male']} 女{entry['female']}/全{entry['total']} ({percent}%)"
-    else:
-        base += f": 女{entry['female']}/全{entry['total']} ({percent}%)"
-    return base
+        components.append(f"男{entry.get('male', 0)}")
+    components.append(f"全{entry.get('total', 0)}")
+    detail = " ".join(components)
+    return f"{label}: {detail} ({percent}%)"
 
 
 def _build_slack_payload(
@@ -343,12 +433,26 @@ def _build_slack_payload(
 ) -> Dict[str, Any]:
     blocks: List[Dict[str, Any]] = []
     if newly_met:
-        lines = "\n".join(f"• {_format_entry(entry)}" for entry in newly_met)
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*新規で条件を満たした日*"}})
+        lines = "\n".join(
+            f"• {_format_entry(entry, markdown=True)}" for entry in newly_met
+        )
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*新規で条件を満たした日*"},
+            }
+        )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": lines}})
     if changed_counts:
-        lines = "\n".join(f"• {_format_entry(entry, include_male=True)}" for entry in changed_counts)
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "*人数が更新された日*"}})
+        lines = "\n".join(
+            f"• {_format_entry(entry, include_male=True, markdown=True)}" for entry in changed_counts
+        )
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*人数が更新された日*"},
+            }
+        )
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": lines}})
     if blocks:
         blocks.append(
@@ -404,7 +508,8 @@ def diff_changes(
             LOGGER.debug("Skipping day %s for diff calculations (considered=False).", entry.get("day"))
             continue
         key = str(entry["day"])
-        prev = prev_days.get(key) if isinstance(prev_days, dict) else None
+        prev_raw = prev_days.get(key) if isinstance(prev_days, dict) else None
+        prev = prev_raw if isinstance(prev_raw, dict) else None
         prev_meets = bool(prev.get("meets")) if prev else False
         meets_now = bool(entry.get("meets"))
         if prev is None and entry.get("total", 0) > 0:
@@ -413,6 +518,7 @@ def diff_changes(
             entry.get("male") != prev.get("male")
             or entry.get("female") != prev.get("female")
             or entry.get("total") != prev.get("total")
+            or entry.get("single_female") != prev.get("single_female")
         ):
             changed_counts.append(entry)
         if not prev_meets and meets_now:
@@ -430,17 +536,22 @@ def build_fallback_text(
     lines: List[str] = []
     if newly_met:
         lines.append("【新規で条件を満たした日】")
-        lines.extend(f"- {_format_entry(entry)}" for entry in newly_met)
+        lines.extend(
+            f"- {_format_entry(entry, markdown=False)}" for entry in newly_met
+        )
     if changed_counts:
         lines.append("【人数が更新された日】")
-        lines.extend(f"- {_format_entry(entry, include_male=True)}" for entry in changed_counts)
+        lines.extend(
+            f"- {_format_entry(entry, include_male=True, markdown=False)}"
+            for entry in changed_counts
+        )
     lines.append(f"URL: {settings.target_url}")
     return "\n".join(lines)
 
 
 def _summary_lines(stats: Sequence[Dict[str, Any]]) -> str:
     return "\n".join(
-        _format_entry(entry, include_male=True)
+        _format_entry(entry, include_male=True, markdown=False)
         for entry in sorted(stats, key=lambda item: item["day"])[:10]
     )
 
@@ -510,10 +621,16 @@ async def run() -> int:
     else:
         return 1
 
-    stats = evaluate_conditions(parse_day_entries(html, settings), settings)
-    print("[DEBUG] parsed first days:",
-      [f"{s['day']}日: 男{s['male']} 女{s['female']} 全{s['total']} ({int(s['ratio']*100)}%)"
-       for s in stats[:10]])
+    parsed_stats = parse_day_entries(html, settings)
+    print(
+        "[DEBUG] parsed first days:",
+        [
+            f"{s['day']}日({s['dow']}): 単女{s.get('single_female', 0)} 女{s.get('female', 0)} "
+            f"男{s.get('male', 0)} 全{s.get('total', 0)} ({int(s.get('ratio', 0.0) * 100)}%)"
+            for s in parsed_stats[:10]
+        ],
+    )
+    stats = evaluate_conditions(parsed_stats, settings)
     LOGGER.info("Parsed %d day entries.", len(stats))
     LOGGER.debug("Stats preview: %s", stats[:10])
 
@@ -524,11 +641,15 @@ async def run() -> int:
         str(entry["day"]): {
             "male": entry["male"],
             "female": entry["female"],
+            "single_female": entry.get("single_female", 0),
             "total": entry["total"],
             "ratio": entry["ratio"],
             "meets": entry["meets"],
-            "dow_en": entry["dow_en"],
+            "dow": entry.get("dow") or entry.get("dow_en"),
+            "dow_en": entry.get("dow_en") or entry.get("dow"),
             "considered": entry["considered"],
+            "required_single_female": entry.get("required_single_female"),
+            "ratio_threshold": entry.get("ratio_threshold"),
         }
         for entry in stats
     }
