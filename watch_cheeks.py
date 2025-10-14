@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,109 +150,146 @@ def should_skip_by_http_headers(settings: Settings, prev: Dict[str, Any]) -> Tup
 
 
 async def fetch_calendar_html(settings: Settings) -> str:
-    """Fetch the calendar HTML using Playwright."""
+    """
+    対象URLを開き、メイン/サブフレームを横断して `table[border='2']` を探索。
+    見つかれば outerHTML を返し、見つからなければページ全体の HTML を返す。
+    """
+
     LOGGER.info("Fetching calendar HTML from %s", settings.target_url)
+
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
         context = await browser.new_context(
+            locale="ja-JP",
             user_agent=(
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120 Safari/537.36"
-            )
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            extra_http_headers={"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"},
         )
         page = await context.new_page()
+
+        table_html: Optional[str] = None
+        hint = "full-page"
         try:
-            await page.goto(settings.target_url, wait_until="networkidle", timeout=60_000)
+            await page.goto(settings.target_url, wait_until="domcontentloaded", timeout=60_000)
+
+            async def extract_from_frame(frame) -> Optional[str]:
+                try:
+                    return await frame.evaluate(
+                        "() => {"
+                        "  const table = document.querySelector(\"table[border='2']\");"
+                        "  return table ? table.outerHTML : null;"
+                        "}"
+                    )
+                except Exception as exc:  # pragma: no cover - depends on document structure
+                    LOGGER.debug("Frame extraction failed: %s", exc)
+                    return None
+
+            table_html = await extract_from_frame(page.main_frame)
+            if table_html:
+                hint = "table-main"
+            else:
+                for frame in page.frames:
+                    if frame is page.main_frame:
+                        continue
+                    table_html = await extract_from_frame(frame)
+                    if table_html:
+                        hint = "table-framed"
+                        break
+
+            if table_html:
+                LOGGER.debug("[DEBUG] html source hint: %s, length=%d", hint, len(table_html))
+                return table_html
+
             html = await page.content()
-            LOGGER.debug("Fetched %d characters of HTML", len(html))
+            LOGGER.debug("[DEBUG] html source hint: %s, length=%d", hint, len(html))
             return html
         finally:
             await context.close()
             await browser.close()
 
 
-def _font_texts_from_cell(td) -> List[str]:
-    texts: List[str] = []
-    centers = td.find_all("center")
-    font_parent = None
-    if len(centers) >= 3:
-        font_parent = centers[2]
-    elif len(centers) >= 2:
-        font_parent = centers[1]
-    if font_parent:
-        fonts = font_parent.find_all("font")
-    else:
-        fonts = []
-    if not fonts:
-        fonts = [font for font in td.find_all("font") if font.find_parent("a")]
-    for font in fonts:
-        text = font.get_text(strip=True)
-        if text:
-            texts.append(text)
-    return texts
-
-
 def parse_day_entries(html: str, settings: Optional[Settings] = None) -> List[Dict[str, Any]]:
-    """Parse the calendar HTML and extract daily participation entries.
-
-    Parameters
-    ----------
-    html:
-        Raw HTML string fetched from the monthly calendar.
-    settings:
-        Optional Settings instance to determine exclusion keywords. Defaults to module SETTINGS.
-
-    Returns
-    -------
-    list of dicts with day statistics sorted by day.
-    """
+    """Parse the calendar HTML and extract daily participation entries."""
 
     cfg = settings or SETTINGS
     soup = BeautifulSoup(html, "lxml")
-    table = soup.select_one("table[border='2']")
-    if not table:
-        LOGGER.warning("Target table not found in HTML.")
-        return []
 
+    table = soup.select_one("table[border='2']")
+    scope_hint = "table[border='2']"
+    if table is None:
+        table = soup.find("table")
+        if table is not None:
+            scope_hint = "table-fallback"
+        else:
+            table = soup
+            scope_hint = "document"
+    LOGGER.debug("Parsing day entries using scope: %s", scope_hint)
+
+    cells = table.find_all("td", attrs={"valign": "top"}) if hasattr(table, "find_all") else []
     results: List[Dict[str, Any]] = []
     exclude_keywords = cfg.exclude_keywords
 
-    for tr in table.find_all("tr"):
-        tds = tr.find_all("td", attrs={"valign": "top"})
-        for idx, td in enumerate(tds):
-            centers = td.find_all("center")
-            if not centers:
+    for idx, td in enumerate(cells):
+        centers = td.find_all("center")
+        if not centers:
+            continue
+
+        day_text = centers[0].get_text(strip=True)
+        if not day_text:
+            continue
+        match = re.search(r"\d+", day_text)
+        if not match:
+            continue
+        day = int(match.group())
+
+        participant_parent = None
+        if len(centers) >= 3:
+            participant_parent = centers[2]
+        elif len(centers) >= 2:
+            participant_parent = centers[1]
+
+        fonts = participant_parent.find_all("font") if participant_parent else []
+        if not fonts:
+            fonts = td.find_all("font")
+
+        texts: List[str] = []
+        for font in fonts:
+            text = font.get_text(strip=True)
+            if not text:
                 continue
-            day_text = centers[0].get_text(strip=True)
-            if not day_text.isdigit():
+            texts.append(text)
+
+        male = 0
+        female = 0
+        valid_texts: List[str] = []
+        for text in texts:
+            lowered = text.lower()
+            if any(keyword in lowered for keyword in exclude_keywords):
+                LOGGER.debug("Excluded text '%s' for day %s due to keyword filter.", text, day)
                 continue
-            day = int(day_text)
-            texts = _font_texts_from_cell(td)
-            male = 0
-            female = 0
-            valid_texts: List[str] = []
-            for text in texts:
-                lowered = text.lower()
-                if any(keyword in lowered for keyword in exclude_keywords):
-                    LOGGER.debug("Excluded text '%s' for day %s due to keyword filter.", text, day)
-                    continue
-                male += text.count("♂")
-                female += text.count("♀")
-                valid_texts.append(text)
-            total = male + female
-            ratio = (female / total) if total else 0.0
-            entry = {
-                "day": day,
-                "dow_index": idx % len(DOW_EN),
-                "dow_en": DOW_EN[idx % len(DOW_EN)],
-                "male": male,
-                "female": female,
-                "total": total,
-                "ratio": ratio,
-                "entries": valid_texts,
-            }
-            LOGGER.debug("Parsed entry: %s", entry)
-            results.append(entry)
+            male += text.count("♂")
+            female += text.count("♀")
+            valid_texts.append(text)
+
+        total = male + female
+        ratio = (female / total) if total else 0.0
+        entry = {
+            "day": day,
+            "dow_index": idx % len(DOW_EN),
+            "dow_en": DOW_EN[idx % len(DOW_EN)],
+            "male": male,
+            "female": female,
+            "total": total,
+            "ratio": ratio,
+            "entries": valid_texts,
+        }
+        LOGGER.debug("Parsed entry: %s", entry)
+        results.append(entry)
 
     results.sort(key=lambda item: item["day"])
     return results
