@@ -2,7 +2,7 @@ name: Weekly summary
 
 on:
   schedule:
-    - cron: '30 0 * * MON'
+    - cron: '17 1 * * MON'
   workflow_dispatch:
 
 permissions:
@@ -28,6 +28,7 @@ concurrency:
 jobs:
   summary:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,6 +42,22 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Restore pip cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Restore Playwright cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
@@ -57,18 +74,19 @@ jobs:
       - name: Collect weekly dataset
         run: python watch_cheeks.py summary --days 7 --raw-output weekly_summary_raw.json
 
-      - name: Generate weekly summary & notify
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json
-
       - name: Upload raw weekly summary
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: weekly-summary-raw
           path: weekly_summary_raw.json
-          retention-days: 7
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Generate weekly summary & notify
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json
 
       - name: Commit masked archives
         run: |
