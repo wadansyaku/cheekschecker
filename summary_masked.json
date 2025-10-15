@@ -1,9 +1,9 @@
 {
   "monthly": {
-    "day_count": 14,
-    "generated_at": "2025-10-15T03:20:33.947786+09:00",
+    "day_count": 15,
+    "generated_at": "2025-10-15T12:03:17.924597+09:00",
     "mask_level": 1,
-    "period_end": "2025-10-14",
+    "period_end": "2025-10-15",
     "period_start": "2025-10-01",
     "stats": {
       "female": {
@@ -82,10 +82,10 @@
         "total": "10-19"
       },
       "水": {
-        "female": "3-4",
+        "female": "2",
         "ratio": "<40%",
-        "single": "2",
-        "total": "10-19"
+        "single": "1",
+        "total": "<10"
       },
       "火": {
         "female": "7-8",

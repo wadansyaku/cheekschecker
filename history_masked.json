@@ -1,6 +1,10 @@
 {
   "mask_level": 1,
+<<<<<<< Updated upstream
   "generated_at": "2025-10-15T12:02:12.227344+09:00",
+=======
+  "generated_at": "2025-10-15T12:03:16.683531+09:00",
+>>>>>>> Stashed changes
   "days": {
     "2025-10-01": {
       "single": "1",
