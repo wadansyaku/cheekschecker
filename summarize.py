@@ -21,6 +21,11 @@ JST = ZoneInfo("Asia/Tokyo")
 DOW_JP = ["月", "火", "水", "木", "金", "土", "日"]
 DOW_ORDER = [0, 1, 2, 3, 4, 5, 6]
 
+STEP_SUMMARY_TITLES = {
+    "weekly": "Cheeks Weekly Summary",
+    "monthly": "Cheeks Monthly Summary",
+}
+
 MASK_COUNT_BANDS: List[Tuple[int, Optional[int], str]] = [
     (0, 0, "0"),
     (1, 1, "1"),
@@ -94,6 +99,28 @@ def configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+def append_step_summary(title: str, sections: Sequence[Tuple[str, Sequence[str]]], fallback: str) -> None:
+    path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(f"## {title}\n\n")
+            if sections:
+                for heading, lines in sections:
+                    handle.write(f"### {heading}\n\n")
+                    if lines:
+                        for line in lines:
+                            handle.write(f"- {line}\n")
+                    else:
+                        handle.write("- 該当なし\n")
+                    handle.write("\n")
+            else:
+                handle.write(f"{fallback or 'No data'}\n\n")
+    except OSError as exc:  # pragma: no cover - filesystem nuances
+        LOGGER.debug("Failed to append step summary: %s", exc)
 
 
 def _parse_iso_date(value: Any) -> Optional[date]:
@@ -339,113 +366,220 @@ def _format_trend_value(key: str, diff: Optional[float]) -> str:
     return f"{arrow} {diff_value:+.1f}"
 
 
-def build_slack_payload(context: SummaryContext, title: str) -> Tuple[Dict[str, Any], str]:
-    def _value_or_zero(value: Optional[float]) -> float:
-        return float(value) if value is not None else 0.0
+def _build_summary_actions_block() -> Dict[str, Any]:
+    repo = os.getenv("GITHUB_REPOSITORY", "wadansyaku/cheekschecker")
+    base_url = f"https://raw.githubusercontent.com/{repo}/main"
+    return {
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "history_masked.json"},
+                "url": f"{base_url}/history_masked.json",
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "summary_masked.json"},
+                "url": f"{base_url}/summary_masked.json",
+            },
+        ],
+    }
 
-    def _int_or_zero(value: Optional[float]) -> int:
-        return int(round(value)) if value is not None else 0
 
-    range_text = f"{context.period_start.month:02d}/{context.period_start.day:02d}({_weekday_label(context.period_start.weekday())})"
-    range_text += "〜"
-    range_text += f"{context.period_end.month:02d}/{context.period_end.day:02d}({_weekday_label(context.period_end.weekday())})"
-    headline = f"*対象期間*: {range_text}\n*対象営業日*: {context.day_count}日"
+def build_slack_payload(
+    context: SummaryContext, title: str, logical_today: Optional[date] = None
+) -> Tuple[Dict[str, Any], str, List[Tuple[str, List[str]]]]:
+    """Generate Slack payload and step-summary sections for the summary."""
+
+    def _fmt_range(start: date, end: date) -> str:
+        start_label = f"{start.month:02d}/{start.day:02d}({_weekday_label(start.weekday())})"
+        end_label = f"{end.month:02d}/{end.day:02d}({_weekday_label(end.weekday())})"
+        return f"{start_label}〜{end_label}"
+
+    def _fmt_ratio(value: Optional[float]) -> str:
+        if value is None:
+            return "-"
+        return f"{value:.1f}%"
+
+    def _fmt_count(value: Optional[float]) -> str:
+        if value is None:
+            return "-"
+        if abs(value - round(value)) < 0.01:
+            return f"{int(round(value))}"
+        return f"{value:.1f}"
+
+    def _latest_record(records: Sequence[DailyRecord]) -> DailyRecord:
+        return max(records, key=lambda r: r.business_day)
 
     stats_single = context.stats["single"]
     stats_female = context.stats["female"]
     stats_ratio = context.stats["ratio"]
 
-    fields = [
-        {
-            "type": "mrkdwn",
-            "text": (
-                "*単独女性*\n"
-                f"平均 {_value_or_zero(stats_single['average']):.1f} / 中央 {_value_or_zero(stats_single['median']):.1f} / 最大 {_int_or_zero(stats_single['max'])}"
-            ),
-        },
-        {
-            "type": "mrkdwn",
-            "text": (
-                "*女性総数*\n"
-                f"平均 {_value_or_zero(stats_female['average']):.1f} / 中央 {_value_or_zero(stats_female['median']):.1f} / 最大 {_int_or_zero(stats_female['max'])}"
-            ),
-        },
-        {
-            "type": "mrkdwn",
-            "text": (
-                "*女性比率*\n"
-                f"平均 {_value_or_zero(stats_ratio['average']):.1f}% / 中央 {_value_or_zero(stats_ratio['median']):.1f}% / 最大 {_value_or_zero(stats_ratio['max']):.1f}%"
-            ),
-        },
+    logical_ref = logical_today or context.period_end
+    today_entry = next((r for r in context.current if r.business_day == logical_ref), None)
+    latest = today_entry or _latest_record(context.current)
+    latest_label = f"{latest.business_day.month:02d}/{latest.business_day.day:02d}({_weekday_label(latest.weekday)})"
+    latest_percent = int(round(latest.ratio * 100))
+    latest_field_lines = [
+        f"{latest_label}",
+        f"単女{latest.single_female} 女{latest.female}/全{latest.total}",
+        f"比率{latest_percent}%",
     ]
 
-    hot_lines = [
+    recent_field_lines = [
+        f"平均 単女{_fmt_count(stats_single['average'])} 女{_fmt_count(stats_female['average'])} 比率{_fmt_ratio(stats_ratio['average'])}",
+        f"中央値 単女{_fmt_count(stats_single['median'])} 女{_fmt_count(stats_female['median'])} 比率{_fmt_ratio(stats_ratio['median'])}",
+        f"最大 単女{_fmt_count(stats_single['max'])} 女{_fmt_count(stats_female['max'])} 比率{_fmt_ratio(stats_ratio['max'])}",
+    ]
+
+    top_lines = [
         f"• {_format_day(record)} 単女{record.single_female} 女{record.female}/全{record.total} ({_format_ratio_percent(record.ratio * 100)})"
         for record in context.top_days
     ]
-    hot_text = "\n".join(hot_lines) if hot_lines else "該当なし"
+    if not top_lines:
+        top_lines.append("• 該当なし")
 
-    trend_lines = [
-        f"• 単独女性: {_format_trend_value('single', context.trend.get('single'))}",
-        f"• 女性総数: {_format_trend_value('female', context.trend.get('female'))}",
-        f"• 女性比率: {_format_trend_value('ratio', context.trend.get('ratio'))}",
-    ]
+    trend_line = (
+        "• 傾向: "
+        f"単女{_format_trend_value('single', context.trend.get('single'))} / "
+        f"女{_format_trend_value('female', context.trend.get('female'))} / "
+        f"比率{_format_trend_value('ratio', context.trend.get('ratio'))}"
+    )
 
-    weekday_lines = []
+    weekday_parts: List[str] = []
     for weekday in DOW_ORDER:
         if weekday not in context.weekday_profile:
             continue
         profile = context.weekday_profile[weekday]
-        weekday_lines.append(
-            f"• {_weekday_label(weekday)}: 単{_value_or_zero(profile['single']):.1f} 女{_value_or_zero(profile['female']):.1f}/全{_value_or_zero(profile['total']):.1f} ({_value_or_zero(profile['ratio']):.1f}%)"
+        weekday_parts.append(
+            f"{_weekday_label(weekday)} 単{_fmt_count(profile['single'])} 女{_fmt_count(profile['female'])} ({_fmt_ratio(profile['ratio'])})"
         )
-    if not weekday_lines:
-        weekday_lines.append("• データ不足")
+    weekday_line = "• 曜日: " + (" / ".join(weekday_parts) if weekday_parts else "データ不足")
 
-    blocks: List[Dict[str, Any]] = [
-        {"type": "header", "text": {"type": "plain_text", "text": f"Cheekschecker {title}", "emoji": False}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
-        {"type": "section", "fields": fields},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "*Hot day Top3*\n" + hot_text}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "*傾向 (直前比)*\n" + "\n".join(trend_lines)}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "*曜日別プロファイル*\n" + "\n".join(weekday_lines)}},
+    range_text = _fmt_range(context.period_start, context.period_end)
+    context_elements = [
+        {"type": "mrkdwn", "text": f"対象期間: {range_text}"},
+        {"type": "mrkdwn", "text": f"営業日数: {context.day_count}日"},
+    ]
+    if context.previous_day_count:
+        context_elements.append(
+            {
+                "type": "mrkdwn",
+                "text": (
+                    "直前対比: "
+                    f"単女{_format_trend_value('single', context.trend.get('single'))} / "
+                    f"比率{_format_trend_value('ratio', context.trend.get('ratio'))}"
+                ),
+            }
+        )
+
+    actions_block = _build_summary_actions_block()
+
+    full_title = title if title.startswith('Cheekschecker') else f'Cheekschecker {title}'
+
+    slack_blocks: List[Dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": full_title, "emoji": False}},
+        {"type": "context", "elements": context_elements},
         {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"更新: {datetime.now(tz=JST).strftime('%m/%d %H:%M')} JST"},
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": "*今日*\n" + "\n".join(latest_field_lines)},
+                {"type": "mrkdwn", "text": "*近日*\n" + "\n".join(recent_field_lines)},
             ],
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Top3 / 傾向 / 曜日*\n" + "\n".join(top_lines + [trend_line, weekday_line]),
+            },
+        },
+        actions_block,
+    ]
+    fallback_lines = [
+        full_title,
+        f"対象期間 {range_text} / 営業日数 {context.day_count}日",
+        "今日: " + ", ".join(latest_field_lines[1:]),
+        "近日: " + "; ".join(recent_field_lines),
+    ]
+    fallback_lines.extend(line.replace("• ", "") for line in top_lines)
+    fallback_lines.append(trend_line.replace("• ", ""))
+    fallback_lines.append(weekday_line.replace("• ", ""))
+    fallback_text = "\n".join(fallback_lines)
+
+    summary_sections: List[Tuple[str, List[str]]] = [
+        ("今日", [", ".join(latest_field_lines)]),
+        ("近日", recent_field_lines),
+        (
+            "Top3/傾向/曜日",
+            [line.replace("• ", "") for line in top_lines]
+            + [trend_line.replace("• ", ""), weekday_line.replace("• ", "")],
+        ),
+    ]
+
+    headline_text = f"*対象期間*: {range_text}\n*営業日数*: {context.day_count}日"
+    compat_blocks: List[Dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": full_title, "emoji": False}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": headline_text}},
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": "*今日*\n" + "\n".join(latest_field_lines)},
+                {"type": "mrkdwn", "text": "*近日*\n" + "\n".join(recent_field_lines)},
+            ],
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*Hot day Top3*\n" + "\n".join(top_lines)},
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*傾向 / 曜日*\n" + "\n".join([trend_line.replace("• ", "• "), weekday_line.replace("• ", "• ")]),
+            },
         },
     ]
 
-    fallback_lines = [
-        f"Cheekschecker {title}",
-        headline.replace("*", ""),
-        "単独女性 平均 {0:.1f} / 中央 {1:.1f} / 最大 {2}".format(
-            _value_or_zero(stats_single["average"]),
-            _value_or_zero(stats_single["median"]),
-            _int_or_zero(stats_single["max"]),
-        ),
-        "女性総数 平均 {0:.1f} / 中央 {1:.1f} / 最大 {2}".format(
-            _value_or_zero(stats_female["average"]),
-            _value_or_zero(stats_female["median"]),
-            _int_or_zero(stats_female["max"]),
-        ),
-        "女性比率 平均 {0:.1f}% / 中央 {1:.1f}% / 最大 {2:.1f}%".format(
-            _value_or_zero(stats_ratio["average"]),
-            _value_or_zero(stats_ratio["median"]),
-            _value_or_zero(stats_ratio["max"]),
-        ),
-    ]
-    if hot_lines:
-        fallback_lines.append("Hot day Top3:")
-        fallback_lines.extend(line.replace("• ", "- ") for line in hot_lines)
-    fallback_lines.append("傾向:")
-    fallback_lines.extend(line.replace("• ", "- ") for line in trend_lines)
-    fallback_lines.append("曜日別プロファイル:")
-    fallback_lines.extend(line.replace("• ", "- ") for line in weekday_lines)
-    fallback_text = "\n".join(fallback_lines)
-    payload = {"text": fallback_text, "blocks": blocks}
+    payload: Dict[str, Any] = {
+        "text": fallback_text,
+        "blocks": compat_blocks,
+        "_summary_sections": summary_sections,
+        "_slack_blocks": slack_blocks,
+    }
     return payload, fallback_text
+
+
+def build_placeholder_summary_payload(
+    title: str, message: str
+) -> Tuple[Dict[str, Any], str, List[Tuple[str, List[str]]]]:
+    actions_block = _build_summary_actions_block()
+    fallback = f"{title} {message}".strip()
+    sections: List[Tuple[str, List[str]]] = [
+        ("今日", ["該当なし"]),
+        ("近日", ["該当なし"]),
+        ("Top3/傾向/曜日", [message]),
+    ]
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": title, "emoji": False}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": message}]},
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": "*今日*\n該当なし"},
+                {"type": "mrkdwn", "text": "*近日*\n該当なし"},
+            ],
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*Top3 / 傾向 / 曜日*\n" + message},
+        },
+        actions_block,
+    ]
+    payload = {"text": fallback, "blocks": blocks}
+    return payload, fallback, sections
 
 
 def _load_masked_history(path: Path) -> Dict[str, Any]:
@@ -584,14 +718,20 @@ def send_simple_message(webhook: str, message: str, title: str) -> None:
     send_slack_message(webhook, payload, f"{title} {message}")
 
 
-def handle_no_data(period_title: str, webhook: str) -> None:
+def handle_no_data(period_title: str, webhook: str, summary_title: str) -> None:
     message = "No data for this period / 集計対象なし"
-    send_simple_message(webhook, message, f"Cheekschecker {period_title}")
+    title = f"Cheekschecker {period_title}"
+    payload, fallback, sections = build_placeholder_summary_payload(title, message)
+    append_step_summary(summary_title, sections, fallback)
+    send_slack_message(webhook, payload, fallback)
 
 
-def handle_broken_data(period_title: str, webhook: str) -> None:
+def handle_broken_data(period_title: str, webhook: str, summary_title: str) -> None:
     message = "集計対象なし/壊れた"
-    send_simple_message(webhook, message, f"Cheekschecker {period_title}")
+    title = f"Cheekschecker {period_title}"
+    payload, fallback, sections = build_placeholder_summary_payload(title, message)
+    append_step_summary(summary_title, sections, fallback)
+    send_slack_message(webhook, payload, fallback)
 
 
 def run_summary(args: argparse.Namespace) -> int:
@@ -599,6 +739,7 @@ def run_summary(args: argparse.Namespace) -> int:
     dataset = load_raw_dataset(args.raw_data)
     period_title = "週次サマリー" if args.period == "weekly" else "月次サマリー"
     webhook = args.slack_webhook
+    summary_title = STEP_SUMMARY_TITLES.get(args.period, period_title)
 
     try:
         context = build_summary_context(args.period, dataset)
@@ -612,12 +753,20 @@ def run_summary(args: argparse.Namespace) -> int:
 
     if context is None:
         if dataset.current:
-            handle_broken_data(period_title, webhook)
+            handle_broken_data(period_title, webhook, summary_title)
         else:
-            handle_no_data(period_title, webhook)
+            handle_no_data(period_title, webhook, summary_title)
         return 0
 
-    payload, fallback_text = build_slack_payload(context, period_title)
+    logical_today = datetime.now(tz=JST).date()
+    header_title = f"Cheekschecker {period_title}"
+    payload, fallback_text = build_slack_payload(
+        context, header_title, logical_today
+    )
+    summary_sections = payload.pop("_summary_sections", [])
+    slack_blocks = payload.pop("_slack_blocks", payload.get("blocks", []))
+    payload["blocks"] = slack_blocks
+    append_step_summary(summary_title, summary_sections, fallback_text)
     send_slack_message(webhook, payload, fallback_text)
     return 0
 
@@ -647,10 +796,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return run_ping(args)
     if not args.raw_data:
         LOGGER.warning("--raw-data not provided; treating as no data")
-        handle_no_data(
-            "週次サマリー" if args.period == "weekly" else "月次サマリー",
-            args.slack_webhook,
-        )
+        period_title = "週次サマリー" if args.period == "weekly" else "月次サマリー"
+        summary_title = STEP_SUMMARY_TITLES.get(args.period, period_title)
+        handle_no_data(period_title, args.slack_webhook, summary_title)
         return 0
     return run_summary(args)
 

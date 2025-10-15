@@ -42,6 +42,8 @@ STATE_PATH = Path("state.json")
 HISTORY_MASKED_PATH = Path("history_masked.json")
 JST = ZoneInfo("Asia/Tokyo")
 
+STEP_SUMMARY_TITLE_MONITOR = "Cheeks Monitor"
+
 DOW_EN = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 DOW_JP = {"Sun": "日", "Mon": "月", "Tue": "火", "Wed": "水", "Thu": "木", "Fri": "金", "Sat": "土"}
 
@@ -155,6 +157,28 @@ def configure_logging() -> None:
     level = logging.DEBUG if os.getenv("DEBUG_LOG") == "1" else logging.INFO
     logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
     LOGGER.debug("Logging configured at level=%s", logging.getLevelName(level))
+
+
+def append_step_summary(title: str, sections: Sequence[Tuple[str, Sequence[str]]], fallback: str) -> None:
+    path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(f"## {title}\n\n")
+            if sections:
+                for heading, lines in sections:
+                    handle.write(f"### {heading}\n\n")
+                    if lines:
+                        for line in lines:
+                            handle.write(f"- {line}\n")
+                    else:
+                        handle.write("- 該当なし\n")
+                    handle.write("\n")
+            else:
+                handle.write(f"{fallback or '該当なし'}\n\n")
+    except OSError as exc:  # pragma: no cover - filesystem edge cases
+        LOGGER.debug("Failed to append step summary: %s", exc)
 
 
 def _parse_keywords(raw: str) -> Tuple[str, ...]:
@@ -943,11 +967,42 @@ def process_notifications(
 
     save_state(state)
 
+    sections: List[Tuple[str, List[str]]] = []
+    if stage_notifications:
+        sections.append(
+            (
+                "基準達成通知",
+                [
+                    _format_stage_notification(entry, action, logical_today)
+                    for entry, action in stage_notifications
+                ],
+            )
+        )
+    if newly_met:
+        sections.append(
+            (
+                "新規成立日",
+                [_format_entry(entry, logical_today) for entry in newly_met],
+            )
+        )
+    if changed_counts:
+        sections.append(
+            (
+                "人数更新",
+                [
+                    _format_entry(entry, logical_today, include_male=True)
+                    for entry in changed_counts
+                ],
+            )
+        )
+
+    fallback = build_fallback_text(stage_notifications, newly_met, changed_counts, logical_today)
+    append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, fallback)
+
     if not (stage_notifications or newly_met or changed_counts):
         LOGGER.info("No notifications to send for logical_today=%s", logical_today)
         return state
 
-    fallback = build_fallback_text(stage_notifications, newly_met, changed_counts, logical_today)
     blocks = _build_slack_blocks(stage_notifications, newly_met, changed_counts, logical_today, settings)
     payload = {"text": fallback, "blocks": blocks or None}
     if settings.ping_channel and not blocks:
@@ -1086,6 +1141,11 @@ def should_skip_by_http_headers(settings: Settings, prev_state: Dict[str, Any]) 
 def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> None:
     if not check_robots_allow(settings):
         LOGGER.warning("Fetch skipped due to robots.txt policy")
+        append_step_summary(
+            STEP_SUMMARY_TITLE_MONITOR,
+            [("実行結果", ["robots.txtにより取得をスキップ"])],
+            "robots.txtにより取得をスキップ",
+        )
         return
 
     now = datetime.now(tz=JST)
@@ -1096,6 +1156,11 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
     if skip:
         LOGGER.info("Skipping fetch because headers indicate no change")
         save_state(state)
+        append_step_summary(
+            STEP_SUMMARY_TITLE_MONITOR,
+            [("実行結果", ["前回取得から変更なし (ETag/Last-Modified)"])],
+            "前回取得から変更なし",
+        )
         return
 
     html, _ = asyncio.run(fetch_calendar_html(settings))
