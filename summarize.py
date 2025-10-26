@@ -241,7 +241,7 @@ def _calc_top_days(records: Sequence[DailyRecord], limit: int = 3) -> List[Daily
             r.female,
             r.ratio,
             r.total,
-            -r.business_day.toordinal(),
+            r.business_day.toordinal(),
         ),
         reverse=True,
     )
