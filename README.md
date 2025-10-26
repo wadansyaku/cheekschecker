@@ -16,6 +16,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - Slack には Block Kit（header → context → fields（今日/近日）→ divider → Top3 → actions）を基本として投稿し、空データ時も同じ構成で「No data for this period / 集計対象なし」を表示します。エラー時のみプレーンテキストへフォールバックします。
 - サマリーで生成した情報は GitHub Step Summary にも同じブロック構成で記録され、レポートの監査・再確認が容易です。
 - リポジトリにコミットされるのは `summary_masked.json` と `history_masked.json` のみで、双方とも人数や比率を帯域表示に丸めた情報です（個人名・生値は保存しません）。
+- `--raw-output` を指定したり `--no-notify` を付けて実行すると Slack 投稿は行わず、生データ収集だけを行えます。
 - summary ワークフローでは `git pull --rebase --autostash` → 変更確認 → コミット → `git push || true` の安全 push を行い、monitor と競合しても落ちない設計にしています。
 
 ## GitHub Actions の構成
@@ -55,7 +56,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
    export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
    python watch_cheeks.py monitor
    ```
-3. サマリーのみ実行する場合は `python watch_cheeks.py summary --days 7 --raw-output weekly.json` → `python summarize.py --period weekly --raw-data weekly.json` のように呼び出します。`summary_masked.json` に丸めた結果が残り、Slack には Block Kit が送信されます。
+3. サマリーのみ実行する場合は `python watch_cheeks.py summary --days 7 --raw-output weekly.json` → `python summarize.py --period weekly --raw-data weekly.json` のように呼び出します。`--raw-output` や `--no-notify` を付けると Slack には投稿されず、ローカルに生データだけが保存されます。
 
 ## プライバシーと法務
 - `ROBOTS_ENFORCE=1` のときは `/robots.txt` を取得し、対象パスが `Disallow` の場合は WARN ログを出して解析・Slack 投稿を行いません。
