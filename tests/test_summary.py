@@ -3,6 +3,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from summarize import (
+    DailyRecord,
     RawDataset,
     build_masked_summary,
     build_summary_context,
@@ -67,3 +68,38 @@ def test_build_summary_context_no_data() -> None:
 
     masked = build_masked_summary(context, history_meta={"mask_level": 1})
     assert masked["status"] == "no-data"
+
+
+def test_top_days_prefers_latest_when_tied() -> None:
+    base_day = date(2024, 2, 1)
+    records = [
+        DailyRecord(
+            business_day=base_day,
+            single_female=5,
+            female=10,
+            total=20,
+            ratio=0.5,
+        ),
+        DailyRecord(
+            business_day=base_day + timedelta(days=1),
+            single_female=5,
+            female=10,
+            total=20,
+            ratio=0.5,
+        ),
+        DailyRecord(
+            business_day=base_day - timedelta(days=1),
+            single_female=4,
+            female=8,
+            total=18,
+            ratio=0.4444,
+        ),
+    ]
+    dataset = RawDataset(period_label="tie-case", current=records, previous=[])
+
+    context = build_summary_context("weekly", dataset)
+    assert context is not None
+    top_days = context.top_days
+
+    assert top_days[0].business_day == base_day + timedelta(days=1)
+    assert top_days[1].business_day == base_day
