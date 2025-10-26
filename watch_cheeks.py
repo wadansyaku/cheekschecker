@@ -1223,13 +1223,15 @@ def summary(
         LOGGER.info("Summary raw dataset written to %s", raw_output)
 
     payload = generate_summary_payload(bundle, logical_today=logical_today, settings=settings)
-    should_notify = notify and raw_output is None
-    if payload and should_notify:
-        notify_slack(payload, settings)
-    elif payload and not should_notify:
-        LOGGER.info("Summary payload generated but Slack notification skipped (data collection mode)")
-    else:
+    if not payload:
         LOGGER.info("No summary payload generated")
+        return
+
+    if not notify:
+        LOGGER.info("Slack notification suppressed by flag")
+        return
+
+    notify_slack(payload, settings)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1245,7 +1247,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     summary_parser.add_argument(
         "--no-notify",
         action="store_true",
-        help="Skip Slack notification (useful for data collection only)",
+        help="Collect data without sending Slack notifications",
     )
 
     return parser

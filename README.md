@@ -11,7 +11,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - Slack へ送った内容（または「該当なし」）は常に `GITHUB_STEP_SUMMARY` に同じ構成で追記されます。過去履歴を GitHub 上で確認しやすくしています。
 
 ## 週次／月次サマリー（summary）
-- `.github/workflows/summary_weekly.yml`（毎週月曜）と `.github/workflows/summary_monthly.yml`（毎月 1 日）が `watch_cheeks.py summary` で最新データを取得し、`summarize.py` で集計します。
+- `.github/workflows/summary_weekly.yml`（毎週月曜）と `.github/workflows/summary_monthly.yml`（毎月 1 日）が `watch_cheeks.py summary` で最新データを取得し、`summarize.py` で集計します。生データ収集時は `--no-notify` フラグで Slack 送信を抑止し、集計済みの通知は `summarize.py` 側だけから行います。
 - `summarize.py` は `history_masked.json` と当該期間の生データ（Artifact 化）を用いて、平均／中央値／最大値、Hot day Top3、直前期間との差分、曜日別プロファイルを算出します。
 - Slack には Block Kit（header → context → fields（今日/近日）→ divider → Top3 → actions）を基本として投稿し、空データ時も同じ構成で「No data for this period / 集計対象なし」を表示します。エラー時のみプレーンテキストへフォールバックします。
 - サマリーで生成した情報は GitHub Step Summary にも同じブロック構成で記録され、レポートの監査・再確認が容易です。
@@ -56,7 +56,8 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
    export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
    python watch_cheeks.py monitor
    ```
-3. サマリーのみ実行する場合は `python watch_cheeks.py summary --days 7 --raw-output weekly.json` → `python summarize.py --period weekly --raw-data weekly.json` のように呼び出します。`--raw-output` や `--no-notify` を付けると Slack には投稿されず、ローカルに生データだけが保存されます。
+3. サマリーのみ実行する場合は `python watch_cheeks.py summary --days 7 --raw-output weekly.json --no-notify` → `python summarize.py --period weekly --raw-data weekly.json` のように呼び出します。`--no-notify` を付けることで生データ取得時の Slack 投稿を抑止し、集計完了後の一度だけ通知されます。`summary_masked.json` に丸めた結果が残り、Slack には Block Kit が送信されます。
+   - **履歴ファイルの競合対策**：`history_masked.json` は monitor ワークフローも更新するため、手動実行前に `git pull --rebase --autostash` を走らせて最新化してください。コンフリクトが出た場合も同コマンドで解消したうえで再実行すると安全です。
 
 ## プライバシーと法務
 - `ROBOTS_ENFORCE=1` のときは `/robots.txt` を取得し、対象パスが `Disallow` の場合は WARN ログを出して解析・Slack 投稿を行いません。

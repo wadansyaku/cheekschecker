@@ -38,6 +38,9 @@ jobs:
       - name: Display trigger info
         run: echo "trigger=${{ github.event_name }} ref=${{ github.ref }} sha=${{ github.sha }}"
 
+      - name: Sync masked history
+        run: git pull --rebase --autostash origin ${{ github.ref_name }}
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -72,7 +75,7 @@ jobs:
         run: python summarize.py --period weekly --ping-only
 
       - name: Collect weekly dataset
-        run: python watch_cheeks.py summary --days 7 --raw-output weekly_summary_raw.json
+        run: python watch_cheeks.py summary --days 7 --raw-output weekly_summary_raw.json --no-notify
 
       - name: Upload raw weekly summary
         if: always()
