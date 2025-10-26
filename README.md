@@ -56,6 +56,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
    python watch_cheeks.py monitor
    ```
 3. サマリーのみ実行する場合は `python watch_cheeks.py summary --days 7 --raw-output weekly.json --no-notify` → `python summarize.py --period weekly --raw-data weekly.json` のように呼び出します。`--no-notify` を付けることで生データ取得時の Slack 投稿を抑止し、集計完了後の一度だけ通知されます。`summary_masked.json` に丸めた結果が残り、Slack には Block Kit が送信されます。
+   - **履歴ファイルの競合対策**：`history_masked.json` は monitor ワークフローも更新するため、手動実行前に `git pull --rebase --autostash` を走らせて最新化してください。コンフリクトが出た場合も同コマンドで解消したうえで再実行すると安全です。
 
 ## プライバシーと法務
 - `ROBOTS_ENFORCE=1` のときは `/robots.txt` を取得し、対象パスが `Disallow` の場合は WARN ログを出して解析・Slack 投稿を行いません。
