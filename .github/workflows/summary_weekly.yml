@@ -72,7 +72,7 @@ jobs:
         run: python summarize.py --period weekly --ping-only
 
       - name: Collect weekly dataset
-        run: python watch_cheeks.py summary --days 7 --raw-output weekly_summary_raw.json
+        run: python watch_cheeks.py summary --days 7 --raw-output weekly_summary_raw.json --no-notify
 
       - name: Upload raw weekly summary
         if: always()

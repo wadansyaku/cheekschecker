@@ -72,7 +72,7 @@ jobs:
         run: python summarize.py --period monthly --ping-only
 
       - name: Collect monthly dataset
-        run: python watch_cheeks.py summary --days 30 --raw-output monthly_summary_raw.json
+        run: python watch_cheeks.py summary --days 30 --raw-output monthly_summary_raw.json --no-notify
 
       - name: Upload raw monthly summary
         if: always()

@@ -1174,7 +1174,13 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
     update_masked_history(entries, settings=settings)
 
 
-def summary(settings: Settings, *, days: int, raw_output: Optional[Path] = None) -> None:
+def summary(
+    settings: Settings,
+    *,
+    days: int,
+    raw_output: Optional[Path] = None,
+    notify: bool = True,
+) -> None:
     if not check_robots_allow(settings):
         LOGGER.warning("Summary skipped due to robots.txt policy")
         return
@@ -1217,10 +1223,15 @@ def summary(settings: Settings, *, days: int, raw_output: Optional[Path] = None)
         LOGGER.info("Summary raw dataset written to %s", raw_output)
 
     payload = generate_summary_payload(bundle, logical_today=logical_today, settings=settings)
-    if payload:
-        notify_slack(payload, settings)
-    else:
+    if not payload:
         LOGGER.info("No summary payload generated")
+        return
+
+    if not notify:
+        LOGGER.info("Slack notification suppressed by flag")
+        return
+
+    notify_slack(payload, settings)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1233,6 +1244,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     summary_parser = subparsers.add_parser("summary", help="Send weekly/monthly summary")
     summary_parser.add_argument("--days", type=int, choices=[7, 30], required=True, help="Summary window in days")
     summary_parser.add_argument("--raw-output", type=Path, help="Path to store raw summary dataset")
+    summary_parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Collect data without sending Slack notifications",
+    )
 
     return parser
 
@@ -1248,7 +1264,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         monitor(settings, output_sanitized=sanitized_path)
     elif args.command == "summary":
         raw_output = getattr(args, "raw_output", None)
-        summary(settings, days=args.days, raw_output=raw_output)
+        summary(settings, days=args.days, raw_output=raw_output, notify=not args.no_notify)
     else:  # pragma: no cover - argparse guards
         parser.print_help()
 
