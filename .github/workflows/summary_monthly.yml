@@ -89,14 +89,24 @@ jobs:
         run: python summarize.py --period monthly --raw-data monthly_summary_raw.json --history history_masked.json --output summary_masked.json
 
       - name: Commit masked archives
-        run: |
-          git config user.email "github-actions@github.com"
-          git config user.name "github-actions"
-          git pull --rebase --autostash origin ${{ github.ref_name }}
-          git add history_masked.json summary_masked.json
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
-          git commit -m "chore: update monthly summary"
-          git push origin HEAD:${{ github.ref_name }} || true
+        id: commit_archives
+        uses: nick-fields/retry@v3
+        with:
+          max_attempts: 3
+          retry_on: error
+          retry_wait_seconds: 30
+          command: |
+            git config user.email "github-actions@github.com"
+            git config user.name "github-actions"
+            git pull --rebase --autostash origin ${{ github.ref_name }}
+            git add history_masked.json summary_masked.json
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+              exit 0
+            fi
+            git commit -m "chore: update monthly summary"
+            git push origin HEAD:${{ github.ref_name }}
+
+      - name: Notify commit failure
+        if: ${{ failure() && steps.commit_archives.outcome == 'failure' }}
+        run: echo "Monthly summary push failed; please check the workflow logs."
