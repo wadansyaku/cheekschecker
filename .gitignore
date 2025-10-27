@@ -8,3 +8,8 @@ __pycache__/
 playwright/.cache/
 # VS Code
 .vscode/
+# Testing & Coverage
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
