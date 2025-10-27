@@ -158,10 +158,6 @@ class SummaryBundle:
     previous_days: List[DailyEntry]
 
 
-def configure_logging() -> None:
-    level = logging.DEBUG if os.getenv("DEBUG_LOG") == "1" else logging.INFO
-    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
-    LOGGER.debug("Logging configured at level=%s", logging.getLevelName(level))
 
 
 def append_step_summary(title: str, sections: Sequence[Tuple[str, Sequence[str]]], fallback: str) -> None:
@@ -416,6 +412,9 @@ def _extract_calendar_table(html: str) -> Optional[Tag]:
     table = soup.find("table", attrs={"border": "2"})
     if not table:
         LOGGER.warning("Calendar table not found")
+        return None
+    if not isinstance(table, Tag):
+        return None
     return table
 
 
@@ -444,7 +443,7 @@ def _extract_content_lines(parts: List[str]) -> List[str]:
     Returns:
         Filtered content lines
     """
-    content_lines = []
+    content_lines: List[str] = []
     for part in parts:
         if re.fullmatch(r"\d{1,2}", part):
             continue
@@ -1436,13 +1435,13 @@ def summary(
         raw_output.write_text(json.dumps(raw_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         LOGGER.info("Summary raw dataset written to %s", raw_output)
 
+    if not notify:
+        LOGGER.info("Slack notification suppressed by flag")
+        return
+
     payload = generate_summary_payload(bundle, logical_today=logical_today, settings=settings)
     if not payload:
         LOGGER.info("No summary payload generated")
-        return
-
-    if not notify:
-        LOGGER.info("Slack notification suppressed by flag")
         return
 
     notify_slack(payload, settings)
@@ -1468,7 +1467,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    configure_logging()
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     settings = load_settings()

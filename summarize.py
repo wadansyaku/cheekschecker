@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import requests
 from zoneinfo import ZoneInfo
 
-from src.logging_config import get_logger
+from src.logging_config import configure_logging, get_logger
 
 LOGGER = get_logger(__name__)
 JST = ZoneInfo("Asia/Tokyo")
@@ -94,13 +94,6 @@ class SummaryContext:
     @property
     def previous_day_count(self) -> int:
         return len(self.previous)
-
-
-def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
 
 
 def append_step_summary(title: str, sections: Sequence[Tuple[str, Sequence[str]]], fallback: str) -> None:
@@ -360,12 +353,12 @@ def _format_trend_value(key: str, diff: Optional[float]) -> str:
     if diff is None:
         return "比較対象なし"
     if key == "ratio":
-        diff_value = round(diff)
-        arrow = "↗" if diff_value > 0 else "↘" if diff_value < 0 else "→"
-        return f"{arrow} {diff_value:+d}pp"
-    diff_value = round(diff, 1)
-    arrow = "↗" if diff_value > 0 else "↘" if diff_value < 0 else "→"
-    return f"{arrow} {diff_value:+.1f}"
+        diff_value_int = round(diff)
+        arrow = "↗" if diff_value_int > 0 else "↘" if diff_value_int < 0 else "→"
+        return f"{arrow} {diff_value_int:+d}pp"
+    diff_value_float = round(diff, 1)
+    arrow = "↗" if diff_value_float > 0 else "↘" if diff_value_float < 0 else "→"
+    return f"{arrow} {diff_value_float:+.1f}"
 
 
 def _build_summary_actions_block() -> Dict[str, Any]:
@@ -831,10 +824,9 @@ def run_summary(args: argparse.Namespace) -> int:
 
     logical_today = datetime.now(tz=JST).date()
     header_title = f"Cheekschecker {period_title}"
-    payload, fallback_text = build_slack_payload(
+    payload, fallback_text, summary_sections = build_slack_payload(
         context, header_title, logical_today
     )
-    summary_sections = payload.pop("_summary_sections", [])
     slack_blocks = payload.pop("_slack_blocks", payload.get("blocks", []))
     payload["blocks"] = slack_blocks
     append_step_summary(summary_title, summary_sections, fallback_text)

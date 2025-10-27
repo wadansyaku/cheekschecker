@@ -107,7 +107,7 @@ def test_summary_skips_notify_with_raw_output(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr("watch_cheeks.notify_slack", fake_notify)
 
     raw_path = tmp_path / "raw.json"
-    summary(make_settings(), days=7, raw_output=raw_path)
+    summary(make_settings(), days=7, raw_output=raw_path, notify=False)
 
     assert raw_path.exists()
     assert captured == []
