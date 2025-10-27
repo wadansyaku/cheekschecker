@@ -36,7 +36,11 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from zoneinfo import ZoneInfo
 
-LOGGER = logging.getLogger("cheekswatch")
+from src.logging_config import configure_logging, get_logger
+
+# Initialize structured logging
+configure_logging(debug=bool(int(os.getenv("DEBUG_LOG", "0"))))
+LOGGER = get_logger(__name__)
 
 STATE_PATH = Path("state.json")
 HISTORY_MASKED_PATH = Path("history_masked.json")
@@ -494,6 +498,11 @@ def parse_day_entries(
             results.append(entry)
 
     results.sort(key=lambda e: e.business_day)
+    LOGGER.info(
+        "parsing_completed",
+        entry_count=len(results),
+        meets_criteria_count=sum(1 for e in results if e.meets)
+    )
     return results
 
 
