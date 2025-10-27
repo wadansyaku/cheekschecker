@@ -113,3 +113,44 @@ jobs:
       - name: Notify commit failure
         if: ${{ failure() && steps.commit_archives.outcome == 'failure' }}
         run: echo "Weekly summary push failed; please check the workflow logs."
+
+  notify-failure:
+    runs-on: ubuntu-latest
+    needs: summary
+    if: failure()
+    steps:
+      - name: Notify Slack on failure
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"text\": \"❌ Workflow Failed: Weekly Summary\",
+                \"blocks\": [{
+                  \"type\": \"header\",
+                  \"text\": {
+                    \"type\": \"plain_text\",
+                    \"text\": \"❌ Workflow Failed\",
+                    \"emoji\": false
+                  }
+                }, {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*Workflow:* Weekly Summary\\n*Branch:* \`${{ github.ref_name }}\`\\n*Trigger:* ${{ github.event_name }}\"
+                  }
+                }, {
+                  \"type\": \"actions\",
+                  \"elements\": [{
+                    \"type\": \"button\",
+                    \"text\": {
+                      \"type\": \"plain_text\",
+                      \"text\": \"View Logs\"
+                    },
+                    \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+                  }]
+                }]
+              }"
+          fi
