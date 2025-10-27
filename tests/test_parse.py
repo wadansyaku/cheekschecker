@@ -80,6 +80,11 @@ def test_parse_day_entries_counts_and_single_logic():
         (date(2024, 4, 5), 31, date(2024, 3, 31)),
         (date(2024, 4, 28), 1, date(2024, 5, 1)),
         (date(2024, 7, 15), 20, date(2024, 7, 20)),
+        # Test case for the bug: Oct 27 should interpret "3" as Nov 3, not Oct 3
+        (date(2025, 10, 27), 3, date(2025, 11, 3)),
+        # Additional edge cases
+        (date(2025, 10, 27), 28, date(2025, 10, 28)),  # Same month, close date
+        (date(2025, 1, 5), 30, date(2024, 12, 30)),     # Early in month, high day -> previous month
     ],
 )
 def test_infer_entry_date(reference_day, cell_day, expected):

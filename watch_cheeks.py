@@ -367,24 +367,35 @@ def infer_entry_date(day: int, reference_date: date) -> date:
     year = reference_date.year
     month = reference_date.month
 
-    if reference_date.day <= 7 and day >= 25:
-        if month == 1:
-            prev_year, prev_month = year - 1, 12
-        else:
-            prev_year, prev_month = year, month - 1
-        last_day = calendar.monthrange(prev_year, prev_month)[1]
-        return date(prev_year, prev_month, min(day, last_day))
+    # First, try the current month
+    last_day_current = calendar.monthrange(year, month)[1]
+    current_month_date = date(year, month, min(day, last_day_current))
 
-    if reference_date.day >= 25 and day <= 7:
+    # Calculate days difference
+    days_diff = (current_month_date - reference_date).days
+
+    # If the date is significantly in the past (more than 15 days ago),
+    # it's likely from next month
+    if days_diff < -15:
         if month == 12:
             next_year, next_month = year + 1, 1
         else:
             next_year, next_month = year, month + 1
-        last_day = calendar.monthrange(next_year, next_month)[1]
-        return date(next_year, next_month, min(day, last_day))
+        last_day_next = calendar.monthrange(next_year, next_month)[1]
+        return date(next_year, next_month, min(day, last_day_next))
 
-    last_day_current = calendar.monthrange(year, month)[1]
-    return date(year, month, min(day, last_day_current))
+    # If the date is significantly in the future (more than 20 days ahead),
+    # it's likely from previous month
+    if days_diff > 20:
+        if month == 1:
+            prev_year, prev_month = year - 1, 12
+        else:
+            prev_year, prev_month = year, month - 1
+        last_day_prev = calendar.monthrange(prev_year, prev_month)[1]
+        return date(prev_year, prev_month, min(day, last_day_prev))
+
+    # Otherwise, return the current month date
+    return current_month_date
 
 
 def parse_day_entries(
