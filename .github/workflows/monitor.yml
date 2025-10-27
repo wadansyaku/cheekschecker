@@ -91,3 +91,44 @@ jobs:
           path: history_masked.json
           if-no-files-found: ignore
           retention-days: 3
+
+  notify-failure:
+    runs-on: ubuntu-latest
+    needs: monitor
+    if: failure()
+    steps:
+      - name: Notify Slack on failure
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"text\": \"❌ Workflow Failed: Monitor Calendar\",
+                \"blocks\": [{
+                  \"type\": \"header\",
+                  \"text\": {
+                    \"type\": \"plain_text\",
+                    \"text\": \"❌ Workflow Failed\",
+                    \"emoji\": false
+                  }
+                }, {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*Workflow:* Monitor Calendar\\n*Branch:* \`${{ github.ref_name }}\`\\n*Trigger:* ${{ github.event_name }}\"
+                  }
+                }, {
+                  \"type\": \"actions\",
+                  \"elements\": [{
+                    \"type\": \"button\",
+                    \"text\": {
+                      \"type\": \"plain_text\",
+                      \"text\": \"View Logs\"
+                    },
+                    \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+                  }]
+                }]
+              }"
+          fi
