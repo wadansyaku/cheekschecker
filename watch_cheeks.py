@@ -33,6 +33,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 from playwright.async_api import async_playwright
 from zoneinfo import ZoneInfo
 
@@ -398,17 +399,163 @@ def infer_entry_date(day: int, reference_date: date) -> date:
     return current_month_date
 
 
+def _extract_calendar_table(html: str) -> Optional[Tag]:
+    """Extract the calendar table from HTML.
+
+    Args:
+        html: HTML content to parse
+
+    Returns:
+        Table element if found, None otherwise
+    """
+    soup = BeautifulSoup(html, "lxml")
+    table = soup.find("table", attrs={"border": "2"})
+    if not table:
+        LOGGER.warning("Calendar table not found")
+    return table
+
+
+def _extract_day_number(parts: List[str]) -> Optional[int]:
+    """Extract day number from cell text parts.
+
+    Args:
+        parts: List of text parts from cell
+
+    Returns:
+        Day number (1-31) if found, None otherwise
+    """
+    for part in parts:
+        match = re.search(r"(\d{1,2})", part)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _extract_content_lines(parts: List[str]) -> List[str]:
+    """Extract content lines excluding dates and day-of-week labels.
+
+    Args:
+        parts: List of text parts from cell
+
+    Returns:
+        Filtered content lines
+    """
+    content_lines = []
+    for part in parts:
+        if re.fullmatch(r"\d{1,2}", part):
+            continue
+        if part.lower() in {"sun", "mon", "tue", "wed", "thu", "fri", "sat"}:
+            continue
+        content_lines.append(part)
+    return content_lines
+
+
+def _count_participants(
+    content_lines: List[str], exclude_keywords: Sequence[str]
+) -> Dict[str, int]:
+    """Count male, female, and single female participants.
+
+    Args:
+        content_lines: List of event description lines
+        exclude_keywords: Keywords to exclude from counting
+
+    Returns:
+        Dictionary with keys: male, female, single_female, total
+    """
+    male_total = female_total = single_total = 0
+
+    for line in content_lines:
+        if _should_exclude_text(line, exclude_keywords):
+            continue
+        male, female, single = _count_participant_line(line)
+        male_total += male
+        female_total += female
+        single_total += single
+
+    total = male_total + female_total
+    return {
+        "male": male_total,
+        "female": female_total,
+        "single_female": single_total,
+        "total": total,
+    }
+
+
+def _build_daily_entry(
+    cell_date: date,
+    day_of_month: int,
+    counts: Dict[str, int],
+    settings: Settings,
+) -> DailyEntry:
+    """Build a DailyEntry from parsed data.
+
+    Args:
+        cell_date: Parsed date for this entry
+        day_of_month: Day of month (1-31)
+        counts: Participant counts dictionary
+        settings: Application settings
+
+    Returns:
+        Constructed DailyEntry
+    """
+    business_dow = _business_dow_label(cell_date)
+    total = counts["total"]
+    ratio = (counts["female"] / total) if total else 0.0
+
+    # Determine if entry should be considered
+    considered = True
+    if settings.include_dow and business_dow not in settings.include_dow:
+        considered = False
+    if settings.min_total is not None and total < settings.min_total:
+        considered = False
+
+    # Evaluate criteria
+    required_single = 5 if business_dow in {"Fri", "Sat"} else 3
+    female_required = max(settings.female_min, required_single)
+    ratio_threshold = max(0.40, settings.female_ratio_min)
+    meets = (
+        considered
+        and counts["single_female"] >= required_single
+        and counts["female"] >= female_required
+        and ratio >= ratio_threshold
+        and total > 0
+    )
+
+    return DailyEntry(
+        raw_date=cell_date,
+        business_day=cell_date,
+        day_of_month=day_of_month,
+        dow_en=business_dow,
+        male=counts["male"],
+        female=counts["female"],
+        single_female=counts["single_female"],
+        total=total,
+        ratio=round(ratio, 4),
+        considered=considered,
+        meets=meets,
+        required_single=required_single,
+    )
+
+
 def parse_day_entries(
     html: str,
     *,
     settings: Optional[Settings] = None,
     reference_date: Optional[date] = None,
 ) -> List[DailyEntry]:
+    """Parse calendar HTML and extract daily entries.
+
+    Args:
+        html: HTML content to parse
+        settings: Application settings (defaults to load_settings())
+        reference_date: Reference date for date inference (defaults to today JST)
+
+    Returns:
+        List of parsed DailyEntry objects, sorted by business_day
+    """
     cfg = settings or load_settings()
-    soup = BeautifulSoup(html, "lxml")
-    table = soup.find("table", attrs={"border": "2"})
+    table = _extract_calendar_table(html)
     if not table:
-        LOGGER.warning("Calendar table not found; returning empty list")
         return []
 
     today = reference_date or datetime.now(tz=JST).date()
@@ -422,74 +569,21 @@ def parse_day_entries(
         cells = row.find_all("td")
         if not cells:
             continue
+
         for cell in cells:
             parts = [part.strip() for part in cell.stripped_strings if part.strip()]
             if not parts:
                 continue
-            number_match = None
-            for part in parts:
-                number_match = re.search(r"(\d{1,2})", part)
-                if number_match:
-                    break
-            if not number_match:
+
+            day_of_month = _extract_day_number(parts)
+            if not day_of_month:
                 continue
-            day_of_month = int(number_match.group(1))
+
             cell_date = infer_entry_date(day_of_month, today)
-            business_dow = _business_dow_label(cell_date)
+            content_lines = _extract_content_lines(parts)
+            counts = _count_participants(content_lines, cfg.exclude_keywords)
+            entry = _build_daily_entry(cell_date, day_of_month, counts, cfg)
 
-            content_lines: List[str] = []
-            for part in parts:
-                if re.fullmatch(r"\d{1,2}", part):
-                    continue
-                if part.lower() in {"sun", "mon", "tue", "wed", "thu", "fri", "sat"}:
-                    continue
-                content_lines.append(part)
-
-            male_total = female_total = single_total = 0
-            valid_lines: List[str] = []
-            for line in content_lines:
-                if _should_exclude_text(line, cfg.exclude_keywords):
-                    continue
-                male, female, single = _count_participant_line(line)
-                male_total += male
-                female_total += female
-                single_total += single
-                valid_lines.append(line)
-
-            total = male_total + female_total
-            ratio = (female_total / total) if total else 0.0
-            dow_value = business_dow
-            considered = True
-            if cfg.include_dow and dow_value not in cfg.include_dow:
-                considered = False
-            if cfg.min_total is not None and total < cfg.min_total:
-                considered = False
-
-            required_single = 5 if business_dow in {"Fri", "Sat"} else 3
-            female_required = max(cfg.female_min, required_single)
-            ratio_threshold = max(0.40, cfg.female_ratio_min)
-            meets = (
-                considered
-                and single_total >= required_single
-                and female_total >= female_required
-                and ratio >= ratio_threshold
-                and total > 0
-            )
-
-            entry = DailyEntry(
-                raw_date=cell_date,
-                business_day=cell_date,
-                day_of_month=day_of_month,
-                dow_en=business_dow,
-                male=male_total,
-                female=female_total,
-                single_female=single_total,
-                total=total,
-                ratio=round(ratio, 4),
-                considered=considered,
-                meets=meets,
-                required_single=required_single,
-            )
             LOGGER.debug("Parsed entry: %s", entry)
             results.append(entry)
 
@@ -922,6 +1016,129 @@ def _merge_state_counts(state_entry: Dict[str, Any], entry: DailyEntry) -> None:
     state_entry["met"] = bool(entry.meets)
 
 
+def _build_notification_sections(
+    stage_notifications: List[Tuple[DailyEntry, str]],
+    newly_met: List[DailyEntry],
+    changed_counts: List[DailyEntry],
+    logical_today: date,
+) -> List[Tuple[str, List[str]]]:
+    """Build notification sections for step summary.
+
+    Args:
+        stage_notifications: Entries with stage transitions
+        newly_met: Newly qualifying entries
+        changed_counts: Entries with count changes
+        logical_today: Logical business day
+
+    Returns:
+        List of (section_title, section_lines) tuples
+    """
+    sections: List[Tuple[str, List[str]]] = []
+
+    if stage_notifications:
+        sections.append(
+            (
+                "基準達成通知",
+                [
+                    _format_stage_notification(entry, action, logical_today)
+                    for entry, action in stage_notifications
+                ],
+            )
+        )
+
+    if newly_met:
+        sections.append(
+            (
+                "新規成立日",
+                [_format_entry(entry, logical_today) for entry in newly_met],
+            )
+        )
+
+    if changed_counts:
+        sections.append(
+            (
+                "人数更新",
+                [
+                    _format_entry(entry, logical_today, include_male=True)
+                    for entry in changed_counts
+                ],
+            )
+        )
+
+    return sections
+
+
+def _process_single_entry(
+    entry: DailyEntry,
+    prev_state: Dict[str, Any],
+    now_ts: int,
+    settings: Settings,
+) -> Tuple[Optional[str], str, int, Dict[str, Any]]:
+    """Process a single entry for notifications.
+
+    Args:
+        entry: Entry to process
+        prev_state: Previous state for this entry
+        now_ts: Current timestamp
+        settings: Application settings
+
+    Returns:
+        Tuple of (action, stage, last_notified, new_state_entry)
+    """
+    action, stage, last_notified = evaluate_stage_transition(
+        entry,
+        prev_state,
+        now_ts=now_ts,
+        cooldown_seconds=settings.cooldown_minutes * 60,
+        bonus_single_delta=settings.bonus_single_delta,
+        bonus_ratio_threshold=settings.bonus_ratio_threshold,
+    )
+
+    state_entry = dict(prev_state)
+    _merge_state_counts(state_entry, entry)
+    state_entry["stage"] = stage
+    state_entry["last_notified_at"] = last_notified
+
+    return action, stage, last_notified, state_entry
+
+
+def _categorize_notifications(
+    entry: DailyEntry,
+    action: Optional[str],
+    prev_state: Dict[str, Any],
+    settings: Settings,
+    stage_notifications: List[Tuple[DailyEntry, str]],
+    newly_met: List[DailyEntry],
+    changed_counts: List[DailyEntry],
+) -> None:
+    """Categorize entry into appropriate notification lists.
+
+    Args:
+        entry: Entry to categorize
+        action: Stage transition action (if any)
+        prev_state: Previous state
+        settings: Application settings
+        stage_notifications: List to append stage notifications
+        newly_met: List to append newly met entries
+        changed_counts: List to append count-changed entries
+    """
+    if action:
+        stage_notifications.append((entry, action))
+
+    previous_met = bool(prev_state.get("met"))
+    if entry.meets and not previous_met:
+        newly_met.append(entry)
+
+    if entry.meets and settings.notify_mode == "changed":
+        counts_before = prev_state.get("counts")
+        if counts_before and (
+            counts_before.get("female") != entry.female
+            or counts_before.get("single_female") != entry.single_female
+            or counts_before.get("total") != entry.total
+        ):
+            changed_counts.append(entry)
+
+
 def process_notifications(
     entries: Sequence[DailyEntry],
     *,
@@ -929,6 +1146,17 @@ def process_notifications(
     logical_today: date,
     state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Process entries and send notifications based on stage transitions.
+
+    Args:
+        entries: Entries to process
+        settings: Application settings
+        logical_today: Logical business day
+        state: Current state (defaults to loading from file)
+
+    Returns:
+        Updated state dictionary
+    """
     now_ts = int(time.time())
     state = state if state is not None else load_state(logical_today)
     days_state = state.setdefault("days", {})
@@ -947,78 +1175,44 @@ def process_notifications(
     for entry in filtered:
         key = _date_key(entry.business_day)
         prev_state = days_state.get(key, {})
-        action, stage, last_notified = evaluate_stage_transition(
-            entry,
-            prev_state,
-            now_ts=now_ts,
-            cooldown_seconds=settings.cooldown_minutes * 60,
-            bonus_single_delta=settings.bonus_single_delta,
-            bonus_ratio_threshold=settings.bonus_ratio_threshold,
-        )
-        previous_met = bool(prev_state.get("met"))
-        counts_before = prev_state.get("counts")
 
-        state_entry = dict(prev_state)
-        _merge_state_counts(state_entry, entry)
-        state_entry["stage"] = stage
-        state_entry["last_notified_at"] = last_notified
+        action, stage, last_notified, state_entry = _process_single_entry(
+            entry, prev_state, now_ts, settings
+        )
         days_state[key] = state_entry
 
-        if action:
-            stage_notifications.append((entry, action))
-        if entry.meets and not previous_met:
-            newly_met.append(entry)
-        if entry.meets and settings.notify_mode == "changed" and counts_before:
-            if (
-                counts_before.get("female") != entry.female
-                or counts_before.get("single_female") != entry.single_female
-                or counts_before.get("total") != entry.total
-            ):
-                changed_counts.append(entry)
+        _categorize_notifications(
+            entry,
+            action,
+            prev_state,
+            settings,
+            stage_notifications,
+            newly_met,
+            changed_counts,
+        )
 
     save_state(state)
 
-    sections: List[Tuple[str, List[str]]] = []
-    if stage_notifications:
-        sections.append(
-            (
-                "基準達成通知",
-                [
-                    _format_stage_notification(entry, action, logical_today)
-                    for entry, action in stage_notifications
-                ],
-            )
-        )
-    if newly_met:
-        sections.append(
-            (
-                "新規成立日",
-                [_format_entry(entry, logical_today) for entry in newly_met],
-            )
-        )
-    if changed_counts:
-        sections.append(
-            (
-                "人数更新",
-                [
-                    _format_entry(entry, logical_today, include_male=True)
-                    for entry in changed_counts
-                ],
-            )
-        )
-
-    fallback = build_fallback_text(stage_notifications, newly_met, changed_counts, logical_today)
+    sections = _build_notification_sections(
+        stage_notifications, newly_met, changed_counts, logical_today
+    )
+    fallback = build_fallback_text(
+        stage_notifications, newly_met, changed_counts, logical_today
+    )
     append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, fallback)
 
     if not (stage_notifications or newly_met or changed_counts):
         LOGGER.info("No notifications to send for logical_today=%s", logical_today)
         return state
 
-    blocks = _build_slack_blocks(stage_notifications, newly_met, changed_counts, logical_today, settings)
+    blocks = _build_slack_blocks(
+        stage_notifications, newly_met, changed_counts, logical_today, settings
+    )
     payload = {"text": fallback, "blocks": blocks or None}
     if settings.ping_channel and not blocks:
         payload["text"] = f"<!channel> {payload['text']}"
     notify_slack(payload, settings)
+
     return state
 
 
