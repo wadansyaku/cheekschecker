@@ -55,10 +55,11 @@ def test_load_and_build_summary(tmp_path: Path) -> None:
     assert masked["top_days"][0]["ratio"] in {"40±", "50±", "60±", "70±", "80+%"}
     assert "月" in masked["weekday_profile"] or "火" in masked["weekday_profile"]
 
-    payload, fallback = build_slack_payload(context, "週次サマリー")
+    payload, fallback, step_sections = build_slack_payload(context, "週次サマリー")
     assert "blocks" in payload and payload["blocks"]
-    assert "Hot day Top3" in payload["blocks"][3]["text"]["text"]
+    assert "Top3 好条件日" in payload["blocks"][3]["text"]["text"]
     assert "Cheekschecker 週次サマリー" in fallback
+    assert len(step_sections) == 4
 
 
 def test_build_summary_context_no_data() -> None:
