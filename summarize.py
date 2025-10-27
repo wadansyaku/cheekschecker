@@ -388,21 +388,36 @@ def _build_summary_actions_block() -> Dict[str, Any]:
     }
 
 
-def build_slack_payload(
-    context: SummaryContext, title: str, logical_today: Optional[date] = None
-) -> Tuple[Dict[str, Any], str, List[Tuple[str, List[str]]]]:
-    """Generate Slack payload and step-summary sections for the summary."""
+def _format_date_range(start: date, end: date) -> str:
+    """Format date range for display.
 
-    def _fmt_range(start: date, end: date) -> str:
-        start_label = f"{start.month:02d}/{start.day:02d}({_weekday_label(start.weekday())})"
-        end_label = f"{end.month:02d}/{end.day:02d}({_weekday_label(end.weekday())})"
-        return f"{start_label}〜{end_label}"
+    Args:
+        start: Start date
+        end: End date
 
-    def _fmt_ratio(value: Optional[float]) -> str:
-        if value is None:
-            return "-"
-        return f"{value:.1f}%"
+    Returns:
+        Formatted range string (e.g., "01/15(月)〜01/21(日)")
+    """
+    start_label = f"{start.month:02d}/{start.day:02d}({_weekday_label(start.weekday())})"
+    end_label = f"{end.month:02d}/{end.day:02d}({_weekday_label(end.weekday())})"
+    return f"{start_label}〜{end_label}"
 
+
+def _format_stats_field(
+    stats_single: Dict[str, Optional[float]],
+    stats_female: Dict[str, Optional[float]],
+    stats_ratio: Dict[str, Optional[float]],
+) -> List[str]:
+    """Format statistics field lines.
+
+    Args:
+        stats_single: Single female statistics
+        stats_female: Female statistics
+        stats_ratio: Ratio statistics
+
+    Returns:
+        List of formatted lines
+    """
     def _fmt_count(value: Optional[float]) -> str:
         if value is None:
             return "-"
@@ -410,61 +425,108 @@ def build_slack_payload(
             return f"{int(round(value))}"
         return f"{value:.1f}"
 
-    def _latest_record(records: Sequence[DailyRecord]) -> DailyRecord:
-        return max(records, key=lambda r: r.business_day)
+    def _fmt_ratio(value: Optional[float]) -> str:
+        if value is None:
+            return "-"
+        return f"{value:.1f}%"
 
-    stats_single = context.stats["single"]
-    stats_female = context.stats["female"]
-    stats_ratio = context.stats["ratio"]
-
-    logical_ref = logical_today or context.period_end
-    today_entry = next((r for r in context.current if r.business_day == logical_ref), None)
-    latest = today_entry or _latest_record(context.current)
-    latest_label = f"{latest.business_day.month:02d}/{latest.business_day.day:02d}({_weekday_label(latest.weekday)})"
-    latest_percent = int(round(latest.ratio * 100))
-    latest_field_lines = [
-        f"{latest_label}",
-        f"単女{latest.single_female} 女{latest.female}/全{latest.total}",
-        f"比率{latest_percent}%",
-    ]
-
-    recent_field_lines = [
+    return [
         f"平均 単女{_fmt_count(stats_single['average'])} 女{_fmt_count(stats_female['average'])} 比率{_fmt_ratio(stats_ratio['average'])}",
         f"中央値 単女{_fmt_count(stats_single['median'])} 女{_fmt_count(stats_female['median'])} 比率{_fmt_ratio(stats_ratio['median'])}",
         f"最大 単女{_fmt_count(stats_single['max'])} 女{_fmt_count(stats_female['max'])} 比率{_fmt_ratio(stats_ratio['max'])}",
     ]
 
-    top_lines = [
-        f"• {_format_day(record)} 単女{record.single_female} 女{record.female}/全{record.total} ({_format_ratio_percent(record.ratio * 100)})"
-        for record in context.top_days
-    ]
-    if not top_lines:
-        top_lines.append("• 該当なし")
 
-    trend_line = (
-        "• 傾向: "
-        f"単女{_format_trend_value('single', context.trend.get('single'))} / "
-        f"女{_format_trend_value('female', context.trend.get('female'))} / "
-        f"比率{_format_trend_value('ratio', context.trend.get('ratio'))}"
-    )
+def _format_latest_field(latest: DailyRecord) -> List[str]:
+    """Format latest entry field lines.
+
+    Args:
+        latest: Latest daily record
+
+    Returns:
+        List of formatted lines
+    """
+    latest_label = f"{latest.business_day.month:02d}/{latest.business_day.day:02d}({_weekday_label(latest.weekday)})"
+    latest_percent = int(round(latest.ratio * 100))
+    return [
+        f"{latest_label}",
+        f"単女{latest.single_female} 女{latest.female}/全{latest.total}",
+        f"比率{latest_percent}%",
+    ]
+
+
+def _format_top_days_section(top_days: Sequence[DailyRecord]) -> List[str]:
+    """Format top days section lines.
+
+    Args:
+        top_days: Top ranked days
+
+    Returns:
+        List of formatted bullet points
+    """
+    if not top_days:
+        return ["• 該当なし"]
+
+    return [
+        f"• {_format_day(record)} 単女{record.single_female} 女{record.female}/全{record.total} ({_format_ratio_percent(record.ratio * 100)})"
+        for record in top_days
+    ]
+
+
+def _format_weekday_profile_line(
+    weekday_profile: Dict[int, Dict[str, Optional[float]]]
+) -> str:
+    """Format weekday profile line.
+
+    Args:
+        weekday_profile: Per-weekday statistics
+
+    Returns:
+        Formatted line
+    """
+    def _fmt_count(value: Optional[float]) -> str:
+        if value is None:
+            return "-"
+        if abs(value - round(value)) < 0.01:
+            return f"{int(round(value))}"
+        return f"{value:.1f}"
+
+    def _fmt_ratio(value: Optional[float]) -> str:
+        if value is None:
+            return "-"
+        return f"{value:.1f}%"
 
     weekday_parts: List[str] = []
     for weekday in DOW_ORDER:
-        if weekday not in context.weekday_profile:
+        if weekday not in weekday_profile:
             continue
-        profile = context.weekday_profile[weekday]
+        profile = weekday_profile[weekday]
         weekday_parts.append(
             f"{_weekday_label(weekday)} 単{_fmt_count(profile['single'])} 女{_fmt_count(profile['female'])} ({_fmt_ratio(profile['ratio'])})"
         )
-    weekday_line = "• 曜日: " + (" / ".join(weekday_parts) if weekday_parts else "データ不足")
 
-    range_text = _fmt_range(context.period_start, context.period_end)
-    context_elements = [
+    return "• 曜日: " + (" / ".join(weekday_parts) if weekday_parts else "データ不足")
+
+
+def _build_context_elements(
+    context: SummaryContext,
+) -> List[Dict[str, Any]]:
+    """Build context elements for Slack message.
+
+    Args:
+        context: Summary context
+
+    Returns:
+        List of context element dictionaries
+    """
+    range_text = _format_date_range(context.period_start, context.period_end)
+    elements = [
         {"type": "mrkdwn", "text": f"対象期間: {range_text}"},
         {"type": "mrkdwn", "text": f"営業日数: {context.day_count}日"},
     ]
+
     if context.previous_day_count:
-        context_elements.append(
+        elements.append(
             {
                 "type": "mrkdwn",
                 "text": (
@@ -475,8 +537,39 @@ def build_slack_payload(
             }
         )
 
-    actions_block = _build_summary_actions_block()
+    return elements
 
+
+def build_slack_payload(
+    context: SummaryContext, title: str, logical_today: Optional[date] = None
+) -> Tuple[Dict[str, Any], str, List[Tuple[str, List[str]]]]:
+    """Generate Slack payload and step-summary sections for the summary."""
+    stats_single = context.stats["single"]
+    stats_female = context.stats["female"]
+    stats_ratio = context.stats["ratio"]
+
+    # Determine latest record
+    logical_ref = logical_today or context.period_end
+    today_entry = next((r for r in context.current if r.business_day == logical_ref), None)
+    latest = today_entry or max(context.current, key=lambda r: r.business_day)
+
+    # Format fields
+    latest_field_lines = _format_latest_field(latest)
+    recent_field_lines = _format_stats_field(stats_single, stats_female, stats_ratio)
+    top_lines = _format_top_days_section(context.top_days)
+
+    # Format trends and weekday profile
+    trend_line = (
+        "• 傾向: "
+        f"単女{_format_trend_value('single', context.trend.get('single'))} / "
+        f"女{_format_trend_value('female', context.trend.get('female'))} / "
+        f"比率{_format_trend_value('ratio', context.trend.get('ratio'))}"
+    )
+    weekday_line = _format_weekday_profile_line(context.weekday_profile)
+
+    # Build Slack blocks
+    context_elements = _build_context_elements(context)
+    actions_block = _build_summary_actions_block()
     full_title = title if title.startswith('Cheekschecker') else f'Cheekschecker {title}'
 
     slack_blocks: List[Dict[str, Any]] = [
@@ -489,68 +582,44 @@ def build_slack_payload(
                 {"type": "mrkdwn", "text": "*近日*\n" + "\n".join(recent_field_lines)},
             ],
         },
-        {"type": "divider"},
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*Top3 / 傾向 / 曜日*\n" + "\n".join(top_lines + [trend_line, weekday_line]),
-            },
-        },
-        actions_block,
+        {"type": "section", "text": {"type": "mrkdwn", "text": "*Top3 好条件日*\n" + "\n".join(top_lines)}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": trend_line}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": weekday_line}},
     ]
+
+    if actions_block:
+        slack_blocks.append(actions_block)
+
+    # Build fallback text
     fallback_lines = [
         full_title,
-        f"対象期間 {range_text} / 営業日数 {context.day_count}日",
-        "今日: " + ", ".join(latest_field_lines[1:]),
-        "近日: " + "; ".join(recent_field_lines),
+        f"期間: {_format_date_range(context.period_start, context.period_end)} ({context.day_count}日)",
+        "",
+        "【今日】",
+        *latest_field_lines,
+        "",
+        "【近日統計】",
+        *recent_field_lines,
+        "",
+        "【Top3】",
+        *top_lines,
+        "",
+        trend_line,
+        weekday_line,
     ]
-    fallback_lines.extend(line.replace("• ", "") for line in top_lines)
-    fallback_lines.append(trend_line.replace("• ", ""))
-    fallback_lines.append(weekday_line.replace("• ", ""))
     fallback_text = "\n".join(fallback_lines)
 
-    summary_sections: List[Tuple[str, List[str]]] = [
-        ("今日", [", ".join(latest_field_lines)]),
-        ("近日", recent_field_lines),
-        (
-            "Top3/傾向/曜日",
-            [line.replace("• ", "") for line in top_lines]
-            + [trend_line.replace("• ", ""), weekday_line.replace("• ", "")],
-        ),
+    # Build step summary sections
+    step_sections: List[Tuple[str, List[str]]] = [
+        ("今日", latest_field_lines),
+        ("近日統計", recent_field_lines),
+        ("Top3", top_lines),
+        ("傾向・曜日", [trend_line, weekday_line]),
     ]
 
-    headline_text = f"*対象期間*: {range_text}\n*営業日数*: {context.day_count}日"
-    compat_blocks: List[Dict[str, Any]] = [
-        {"type": "header", "text": {"type": "plain_text", "text": full_title, "emoji": False}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": headline_text}},
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": "*今日*\n" + "\n".join(latest_field_lines)},
-                {"type": "mrkdwn", "text": "*近日*\n" + "\n".join(recent_field_lines)},
-            ],
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "*Hot day Top3*\n" + "\n".join(top_lines)},
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*傾向 / 曜日*\n" + "\n".join([trend_line.replace("• ", "• "), weekday_line.replace("• ", "• ")]),
-            },
-        },
-    ]
+    payload = {"text": fallback_text, "blocks": slack_blocks}
+    return payload, fallback_text, step_sections
 
-    payload: Dict[str, Any] = {
-        "text": fallback_text,
-        "blocks": compat_blocks,
-        "_summary_sections": summary_sections,
-        "_slack_blocks": slack_blocks,
-    }
-    return payload, fallback_text
 
 
 def build_placeholder_summary_payload(
