@@ -15,7 +15,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import requests
 from zoneinfo import ZoneInfo
 
-LOGGER = logging.getLogger("summarize")
+from src.logging_config import get_logger
+
+LOGGER = get_logger(__name__)
 JST = ZoneInfo("Asia/Tokyo")
 
 DOW_JP = ["月", "火", "水", "木", "金", "土", "日"]
