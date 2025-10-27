@@ -412,6 +412,9 @@ def _extract_calendar_table(html: str) -> Optional[Tag]:
     table = soup.find("table", attrs={"border": "2"})
     if not table:
         LOGGER.warning("Calendar table not found")
+        return None
+    if not isinstance(table, Tag):
+        return None
     return table
 
 
