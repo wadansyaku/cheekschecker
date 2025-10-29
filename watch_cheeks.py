@@ -1000,10 +1000,13 @@ def _filter_entries_for_notifications(
 ) -> List[DailyEntry]:
     filtered: List[DailyEntry] = []
     cutoff = logical_today - timedelta(days=ignore_older_than)
+    max_notify_day = logical_today + timedelta(days=1)
     for entry in entries:
         if entry.business_day < cutoff:
             continue
         if notify_from_today and entry.business_day < logical_today:
+            continue
+        if entry.business_day > max_notify_day:
             continue
         filtered.append(entry)
     return filtered
