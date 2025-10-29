@@ -1,6 +1,6 @@
 import sys
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -150,3 +150,32 @@ def test_process_notifications_filters_past(monkeypatch, tmp_path):
     assert len(captured) == 1
     assert "初回" in captured[0]["text"]
     assert logical_today.strftime("%d") in captured[0]["text"]
+
+
+def test_process_notifications_limits_to_today_and_tomorrow(monkeypatch, tmp_path):
+    captured = []
+
+    def fake_notify(payload, settings):
+        captured.append(payload)
+
+    monkeypatch.setattr("watch_cheeks.STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr("watch_cheeks.notify_slack", fake_notify)
+    monkeypatch.setattr("watch_cheeks.time", type("T", (), {"time": staticmethod(lambda: 2000)}))
+
+    settings = make_settings()
+    logical_today = date(2024, 1, 10)
+
+    today_entry = make_entry(3, 4, business_day=logical_today)
+    tomorrow_entry = make_entry(3, 4, business_day=logical_today + timedelta(days=1))
+    future_entry = make_entry(3, 4, business_day=logical_today + timedelta(days=2))
+
+    process_notifications(
+        [today_entry, tomorrow_entry, future_entry],
+        settings=settings,
+        logical_today=logical_today,
+    )
+
+    assert len(captured) == 1
+    text = captured[0]["text"]
+    assert "明日" in text
+    assert "2日後" not in text
