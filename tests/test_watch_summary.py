@@ -1,3 +1,4 @@
+import json
 import sys
 from dataclasses import replace
 from datetime import date
@@ -128,3 +129,17 @@ def test_summary_skips_notify_when_disabled(monkeypatch: pytest.MonkeyPatch) -> 
     summary(make_settings(), days=7, notify=False)
 
     assert captured == []
+
+
+def test_summary_writes_nested_raw_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    bundle = make_bundle()
+    payload = {"text": "ok"}
+    stub_summary_dependencies(monkeypatch, bundle, payload)
+
+    nested_path = tmp_path / "subdir/output.json"
+
+    summary(make_settings(), days=7, raw_output=nested_path, notify=False)
+
+    assert nested_path.exists()
+    content = json.loads(nested_path.read_text(encoding="utf-8"))
+    assert content["period_label"] == bundle.period_label

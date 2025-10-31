@@ -1386,6 +1386,7 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
 
     html, _ = asyncio.run(fetch_calendar_html(settings))
     if output_sanitized:
+        output_sanitized.parent.mkdir(parents=True, exist_ok=True)
         output_sanitized.write_text(sanitize_html(html), encoding="utf-8")
         LOGGER.info("Sanitized HTML written to %s", output_sanitized)
 
@@ -1414,6 +1415,7 @@ def summary(
     bundle = select_summary_bundle(entries, logical_today=logical_today, days=days)
 
     if raw_output:
+        raw_output.parent.mkdir(parents=True, exist_ok=True)
         raw_payload = {
             "generated_at": datetime.now(tz=JST).isoformat(),
             "period_label": bundle.period_label,
