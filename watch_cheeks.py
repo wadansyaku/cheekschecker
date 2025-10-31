@@ -833,7 +833,12 @@ def mask_entry(entry: DailyEntry, mask_level: int) -> Dict[str, str]:
     # level 2 -> coarse labels
     single_index = min(len(MASK_LEVEL2_WORDS["single"]) - 1, entry.single_female // 3)
     female_index = min(len(MASK_LEVEL2_WORDS["female"]) - 1, entry.female // 4)
-    ratio_index = min(len(MASK_LEVEL2_WORDS["ratio"]) - 1, int(entry.ratio * 5))
+    if entry.ratio < 0.4:
+        ratio_index = 0
+    elif entry.ratio < 0.6:
+        ratio_index = 1
+    else:
+        ratio_index = 2
     total_index = min(len(MASK_LEVEL2_WORDS["total"]) - 1, entry.total // 15)
     return {
         "single": MASK_LEVEL2_WORDS["single"][single_index],
