@@ -64,6 +64,13 @@ DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Ge
 DEFAULT_USER_AGENT_ID = "CheekscheckerBot/1.0"
 
 DATE_KEY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DATE_ATTR_CANDIDATES = (
+    "data-date",
+    "data-day",
+    "data-date-iso",
+    "data-day-iso",
+    "data-full-date",
+)
 FULLWIDTH_TO_ASCII = str.maketrans({
     "０": "0",
     "１": "1",
@@ -400,22 +407,59 @@ def infer_entry_date(day: int, reference_date: date) -> date:
 
 
 def _extract_calendar_table(html: str) -> Optional[Tag]:
-    """Extract the calendar table from HTML.
+    """Extract the reservation calendar table from HTML.
+
+    The official site occasionally tweaks the markup – for example changing the
+    ``border`` attribute or wrapping the calendar in additional layout tables –
+    which previously caused the parser to bail out early.  We therefore search
+    for the first table that *looks* like a calendar instead of relying on a
+    single attribute.
 
     Args:
         html: HTML content to parse
 
     Returns:
-        Table element if found, None otherwise
+        Table element if found, ``None`` otherwise
     """
+
     soup = BeautifulSoup(html, "lxml")
+
+    # Prefer the historic ``border="2"`` table for backwards compatibility.
     table = soup.find("table", attrs={"border": "2"})
-    if not table:
-        LOGGER.warning("Calendar table not found")
-        return None
-    if not isinstance(table, Tag):
-        return None
-    return table
+    if table and isinstance(table, Tag):
+        return table
+
+    # Fallback: look for a table that contains enough day numbers and weekday
+    # labels to plausibly be the reservation calendar.
+    dow_tokens = set(DOW_JP.values()) | set(DOW_EN)
+    for candidate in soup.find_all("table"):
+        if not isinstance(candidate, Tag):
+            continue
+        strings = list(candidate.stripped_strings)
+        if not strings:
+            continue
+
+        day_hits = 0
+        dow_hits = 0
+        for text in strings:
+            stripped = text.strip()
+            if not stripped:
+                continue
+            if stripped in dow_tokens:
+                dow_hits += 1
+            else:
+                try:
+                    value = int(stripped)
+                except ValueError:
+                    continue
+                if 1 <= value <= 31:
+                    day_hits += 1
+
+        if day_hits >= 10 and dow_hits >= 3:
+            return candidate
+
+    LOGGER.warning("Calendar table not found")
+    return None
 
 
 def _extract_day_number(parts: List[str]) -> Optional[int]:
@@ -431,6 +475,40 @@ def _extract_day_number(parts: List[str]) -> Optional[int]:
         match = re.search(r"(\d{1,2})", part)
         if match:
             return int(match.group(1))
+    return None
+
+
+def _parse_date_attribute(raw: str) -> Optional[date]:
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+
+    iso_candidate = cleaned.split()[0]
+    if "T" in iso_candidate:
+        iso_candidate = iso_candidate.split("T", 1)[0]
+    iso_candidate = iso_candidate.replace("/", "-")
+
+    try:
+        return datetime.fromisoformat(iso_candidate).date()
+    except ValueError:
+        match = re.search(r"(\d{4})\D(\d{1,2})\D(\d{1,2})", cleaned)
+        if match:
+            year, month, day = map(int, match.groups())
+            return date(year, month, day)
+    return None
+
+
+def _extract_explicit_cell_date(cell: Tag) -> Optional[date]:
+    """Extract explicit date hints from attributes within a cell."""
+
+    for element in [cell, *cell.find_all(True)]:
+        for attr in DATE_ATTR_CANDIDATES:
+            raw = element.get(attr)
+            if not raw:
+                continue
+            parsed = _parse_date_attribute(str(raw))
+            if parsed:
+                return parsed
     return None
 
 
@@ -578,11 +656,19 @@ def parse_day_entries(
             if not parts:
                 continue
 
+            explicit_date = _extract_explicit_cell_date(cell)
             day_of_month = _extract_day_number(parts)
-            if not day_of_month:
+
+            if explicit_date is None and day_of_month is None:
                 continue
 
-            cell_date = infer_entry_date(day_of_month, today)
+            if explicit_date is not None:
+                cell_date = explicit_date
+                if day_of_month is None:
+                    day_of_month = explicit_date.day
+            else:
+                cell_date = infer_entry_date(day_of_month, today)
+
             content_lines = _extract_content_lines(parts)
             counts = _count_participants(content_lines, cfg.exclude_keywords)
             entry = _build_daily_entry(cell_date, day_of_month, counts, cfg)

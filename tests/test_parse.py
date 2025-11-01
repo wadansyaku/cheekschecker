@@ -16,6 +16,7 @@ from watch_cheeks import (  # noqa: E402
 )
 
 FIXTURE_PATH = Path("tests/fixtures/sample_yoyaku.html")
+MODERN_FIXTURE_PATH = Path("tests/fixtures/sample_yoyaku_modern.html")
 
 BASE_SETTINGS = Settings(
     target_url="http://example.com",
@@ -72,6 +73,22 @@ def test_parse_day_entries_counts_and_single_logic():
     assert day7.female == 5
     assert day7.male == 0
     assert day7.dow_en == "Sun"
+
+
+def test_parse_day_entries_modern_layout_with_explicit_dates():
+    html = MODERN_FIXTURE_PATH.read_text(encoding="utf-8")
+    entries = parse_day_entries(html, settings=BASE_SETTINGS, reference_date=date(2025, 11, 2))
+
+    # The modern layout provides explicit ISO dates, so the parser should trust
+    # them even when they stray outside the current month window.
+    dates = [entry.business_day for entry in entries]
+    assert date(2025, 11, 1) in dates
+    assert date(2025, 11, 6) in dates
+    assert date(2025, 12, 15) in dates
+
+    december_entry = next(entry for entry in entries if entry.business_day == date(2025, 12, 15))
+    assert december_entry.female == 3  # two symbols + solitary line
+    assert december_entry.single_female == 1
 
 
 @pytest.mark.parametrize(
