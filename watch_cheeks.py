@@ -38,6 +38,13 @@ from playwright.async_api import async_playwright
 from zoneinfo import ZoneInfo
 
 from src.logging_config import configure_logging, get_logger
+from src.masking import (
+    DEFAULT_MASKING_CONFIG,
+    CountBand,
+    MaskingConfig,
+    RatioBand,
+    load_masking_config,
+)
 
 # Initialize structured logging
 configure_logging(debug=bool(int(os.getenv("DEBUG_LOG", "0"))))
@@ -86,35 +93,11 @@ FULLWIDTH_TO_ASCII = str.maketrans({
 MULTIPLIER_PATTERN = re.compile(r"(?:[×xX＊*])\s*([0-9０-９]+)")
 GROUP_COUNT_PATTERN = re.compile(r"([0-9０-９]+)\s*(?:人|名|組)")
 
-MASK_COUNT_BANDS = [
-    (0, 0, "0"),
-    (1, 1, "1"),
-    (2, 2, "2"),
-    (3, 4, "3-4"),
-    (5, 6, "5-6"),
-    (7, 8, "7-8"),
-    (9, None, "9+")
-]
-MASK_TOTAL_BANDS = [
-    (0, 9, "<10"),
-    (10, 19, "10-19"),
-    (20, 29, "20-29"),
-    (30, 49, "30-49"),
-    (50, None, "50+")
-]
-MASK_RATIO_BANDS = [
-    (0.0, 0.39, "<40%"),
-    (0.40, 0.49, "40±"),
-    (0.50, 0.59, "50±"),
-    (0.60, 0.69, "60±"),
-    (0.70, 0.79, "70±"),
-    (0.80, None, "80+%"),
-]
+MASK_COUNT_BANDS: list[CountBand] = list(DEFAULT_MASKING_CONFIG.count_bands)
+MASK_TOTAL_BANDS: list[CountBand] = list(DEFAULT_MASKING_CONFIG.total_bands)
+MASK_RATIO_BANDS: list[RatioBand] = list(DEFAULT_MASKING_CONFIG.ratio_bands)
 MASK_LEVEL2_WORDS = {
-    "single": ["静" , "穏", "賑"],
-    "female": ["薄", "適", "厚"],
-    "ratio": ["低", "中", "高"],
-    "total": ["少", "並", "盛"],
+    key: list(words) for key, words in DEFAULT_MASKING_CONFIG.level2_words.items()
 }
 
 
@@ -139,6 +122,7 @@ class Settings:
     mask_level: int
     robots_enforce: bool
     ua_contact: Optional[str]
+    masking_config: MaskingConfig = field(default=DEFAULT_MASKING_CONFIG)
     history_masked_path: Path = field(default=HISTORY_MASKED_PATH)
 
 
@@ -282,6 +266,8 @@ def load_settings() -> Settings:
     mask_level = _parse_int(os.getenv("MASK_LEVEL"), DEFAULT_MASK_LEVEL)
     robots_enforce = os.getenv("ROBOTS_ENFORCE", "0") in {"1", "true", "True"}
     ua_contact = os.getenv("UA_CONTACT")
+    mask_config_path = os.getenv("MASK_CONFIG_PATH")
+    masking_config = load_masking_config(mask_config_path)
 
     settings = Settings(
         target_url=target_url,
@@ -303,6 +289,7 @@ def load_settings() -> Settings:
         mask_level=mask_level,
         robots_enforce=robots_enforce,
         ua_contact=ua_contact,
+        masking_config=masking_config,
     )
     LOGGER.debug("Loaded settings: %s", settings)
     return settings
@@ -908,29 +895,46 @@ def _bin_ratio(value: float, bands: Sequence[Tuple[float, Optional[float], str]]
     return bands[-1][2]
 
 
-def mask_entry(entry: DailyEntry, mask_level: int) -> Dict[str, str]:
+def mask_entry(
+    entry: DailyEntry,
+    mask_level: int,
+    masking_config: MaskingConfig = DEFAULT_MASKING_CONFIG,
+) -> Dict[str, str]:
     if mask_level <= 1:
         return {
-            "single": _bin_value(entry.single_female, MASK_COUNT_BANDS),
-            "female": _bin_value(entry.female, MASK_COUNT_BANDS),
-            "total": _bin_value(entry.total, MASK_TOTAL_BANDS),
-            "ratio": _bin_ratio(entry.ratio, MASK_RATIO_BANDS),
+            "single": _bin_value(entry.single_female, masking_config.count_bands),
+            "female": _bin_value(entry.female, masking_config.count_bands),
+            "total": _bin_value(entry.total, masking_config.total_bands),
+            "ratio": _bin_ratio(entry.ratio, masking_config.ratio_bands),
         }
-    # level 2 -> coarse labels
-    single_index = min(len(MASK_LEVEL2_WORDS["single"]) - 1, entry.single_female // 3)
-    female_index = min(len(MASK_LEVEL2_WORDS["female"]) - 1, entry.female // 4)
-    if entry.ratio < 0.4:
-        ratio_index = 0
-    elif entry.ratio < 0.6:
-        ratio_index = 1
-    else:
-        ratio_index = 2
-    total_index = min(len(MASK_LEVEL2_WORDS["total"]) - 1, entry.total // 15)
+
+    level2_words = masking_config.level2_words
+    level2_divisors = masking_config.level2_divisors
+
+    single_words = level2_words.get("single", ("静", "穏", "賑"))
+    female_words = level2_words.get("female", ("薄", "適", "厚"))
+    ratio_words = level2_words.get("ratio", ("低", "中", "高"))
+    total_words = level2_words.get("total", ("少", "並", "盛"))
+
+    single_divisor = max(1, level2_divisors.get("single", 3))
+    female_divisor = max(1, level2_divisors.get("female", 4))
+    total_divisor = max(1, level2_divisors.get("total", 15))
+
+    single_index = min(len(single_words) - 1, entry.single_female // single_divisor)
+    female_index = min(len(female_words) - 1, entry.female // female_divisor)
+    total_index = min(len(total_words) - 1, entry.total // total_divisor)
+
+    thresholds = masking_config.level2_ratio_thresholds
+    ratio_index = 0
+    while ratio_index < len(thresholds) and entry.ratio >= thresholds[ratio_index]:
+        ratio_index += 1
+    ratio_index = min(len(ratio_words) - 1, ratio_index)
+
     return {
-        "single": MASK_LEVEL2_WORDS["single"][single_index],
-        "female": MASK_LEVEL2_WORDS["female"][female_index],
-        "ratio": MASK_LEVEL2_WORDS["ratio"][ratio_index],
-        "total": MASK_LEVEL2_WORDS["total"][total_index],
+        "single": single_words[single_index],
+        "female": female_words[female_index],
+        "ratio": ratio_words[ratio_index],
+        "total": total_words[total_index],
     }
 
 
@@ -1422,7 +1426,9 @@ def update_masked_history(entries: Sequence[DailyEntry], *, settings: Settings) 
 
     for entry in entries:
         key = _date_key(entry.business_day)
-        history["days"][key] = mask_entry(entry, settings.mask_level)
+        history["days"][key] = mask_entry(
+            entry, settings.mask_level, settings.masking_config
+        )
 
     save_masked_history(history)
 
