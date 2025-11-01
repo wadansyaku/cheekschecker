@@ -16,6 +16,12 @@ import requests
 from zoneinfo import ZoneInfo
 
 from src.logging_config import configure_logging, get_logger
+from src.masking import (
+    DEFAULT_MASKING_CONFIG,
+    CountBand,
+    RatioBand,
+    load_masking_config,
+)
 
 LOGGER = get_logger(__name__)
 JST = ZoneInfo("Asia/Tokyo")
@@ -28,30 +34,13 @@ STEP_SUMMARY_TITLES = {
     "monthly": "Cheeks Monthly Summary",
 }
 
-MASK_COUNT_BANDS: List[Tuple[int, Optional[int], str]] = [
-    (0, 0, "0"),
-    (1, 1, "1"),
-    (2, 2, "2"),
-    (3, 4, "3-4"),
-    (5, 6, "5-6"),
-    (7, 8, "7-8"),
-    (9, None, "9+"),
-]
-MASK_TOTAL_BANDS: List[Tuple[int, Optional[int], str]] = [
-    (0, 9, "<10"),
-    (10, 19, "10-19"),
-    (20, 29, "20-29"),
-    (30, 49, "30-49"),
-    (50, None, "50+"),
-]
-MASK_RATIO_BANDS: List[Tuple[float, Optional[float], str]] = [
-    (0.0, 0.39, "<40%"),
-    (0.40, 0.49, "40±"),
-    (0.50, 0.59, "50±"),
-    (0.60, 0.69, "60±"),
-    (0.70, 0.79, "70±"),
-    (0.80, None, "80+%"),
-]
+MASKING_CONFIG = load_masking_config(os.getenv("MASK_CONFIG_PATH"))
+if MASKING_CONFIG is DEFAULT_MASKING_CONFIG and os.getenv("MASK_CONFIG_PATH"):
+    LOGGER.debug("Using default masking configuration")
+
+MASK_COUNT_BANDS: List[CountBand] = list(MASKING_CONFIG.count_bands)
+MASK_TOTAL_BANDS: List[CountBand] = list(MASKING_CONFIG.total_bands)
+MASK_RATIO_BANDS: List[RatioBand] = list(MASKING_CONFIG.ratio_bands)
 
 
 @dataclass(frozen=True)
