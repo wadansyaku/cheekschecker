@@ -518,6 +518,35 @@ def _extract_content_lines(parts: List[str]) -> List[str]:
     return content_lines
 
 
+def _normalise_participant_label(text: str) -> str:
+    """Normalise participant label text for duplicate detection."""
+
+    translated = text.translate(FULLWIDTH_TO_ASCII)
+    base = re.sub(r"[♂♀]", "", translated).replace("　", " ").strip()
+    if not base:
+        return ""
+
+    # Focus on the first token (name/label) before supplementary notes such as
+    # "(追記です)" or " 3人です" to avoid treating updates as separate people.
+    token = re.split(r"[\s(（\[\{／/|｜・]+", base, maxsplit=1)[0]
+    token = token or base
+
+    normalised = token.lower()
+    normalised = re.sub(r"[×x＊*]+", "", normalised)
+    normalised = re.sub(r"[0-9]+", "", normalised)
+    normalised = normalised.replace("人", "").replace("名", "").replace("組", "")
+    normalised = re.sub(r"[()（）\[\]{}<>『』「」【】、。,.!！?？:：;；~〜'\"`´^＾\\-]", "", normalised)
+    normalised = normalised.strip()
+    if normalised:
+        return normalised
+
+    fallback = re.sub(r"[()（）\[\]{}<>『』「」【】、。,.!！?？:：;；~〜'\"`´^＾\\|／/・-]", "", base.lower())
+    fallback = re.sub(r"[0-9]+", "", fallback)
+    fallback = fallback.replace("人", "").replace("名", "").replace("組", "")
+    fallback = fallback.strip()
+    return fallback or base.lower() or base
+
+
 def _count_participants(
     content_lines: List[str], exclude_keywords: Sequence[str]
 ) -> Dict[str, int]:
@@ -530,15 +559,31 @@ def _count_participants(
     Returns:
         Dictionary with keys: male, female, single_female, total
     """
-    male_total = female_total = single_total = 0
+    participants: Dict[str, Dict[str, int]] = {}
 
     for line in content_lines:
         if _should_exclude_text(line, exclude_keywords):
             continue
         male, female, single = _count_participant_line(line)
-        male_total += male
-        female_total += female
-        single_total += single
+
+        key = _normalise_participant_label(line)
+        stored = participants.get(key)
+        if stored is None:
+            participants[key] = {
+                "male": male,
+                "female": female,
+                "single_female": single,
+            }
+        else:
+            stored["male"] = max(stored["male"], male)
+            stored["female"] = max(stored["female"], female)
+            stored["single_female"] = max(stored["single_female"], single)
+
+    male_total = sum(values["male"] for values in participants.values())
+    female_total = sum(values["female"] for values in participants.values())
+    single_total = sum(
+        1 for values in participants.values() if values["female"] == 1 and values["male"] == 0
+    )
 
     total = male_total + female_total
     return {

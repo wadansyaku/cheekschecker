@@ -91,6 +91,35 @@ def test_parse_day_entries_modern_layout_with_explicit_dates():
     assert december_entry.single_female == 1
 
 
+def test_parse_day_entries_deduplicates_repeated_commenters():
+    html = """
+    <html>
+      <body>
+        <table border=\"2\">
+          <tr>
+            <td valign=\"top\">
+              <center>1</center>
+              <center>Mon</center>
+              <center>
+                <font>♀なお</font><br/>
+                <font>♀なお(追記です)</font><br/>
+                <font>♀なお 3人です</font><br/>
+              </center>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+    """
+
+    entries = parse_day_entries(html, settings=BASE_SETTINGS, reference_date=date(2024, 1, 1))
+
+    assert len(entries) == 1
+    assert entries[0].female == 3
+    assert entries[0].male == 0
+    assert entries[0].single_female == 0
+
+
 @pytest.mark.parametrize(
     "reference_day, cell_day, expected",
     [
