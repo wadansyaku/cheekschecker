@@ -674,39 +674,13 @@ def parse_day_entries(
     today = reference_date or datetime.now(tz=JST).date()
     results: List[DailyEntry] = []
 
-    rows = table.find_all("tr")
-    if not rows:
-        return []
-
-    for row in rows:
-        cells = row.find_all("td")
-        if not cells:
+    for cell in _iter_calendar_cells(table):
+        entry = _parse_calendar_cell(cell, today, cfg)
+        if entry is None:
             continue
 
-        for cell in cells:
-            parts = [part.strip() for part in cell.stripped_strings if part.strip()]
-            if not parts:
-                continue
-
-            explicit_date = _extract_explicit_cell_date(cell)
-            day_of_month = _extract_day_number(parts)
-
-            if explicit_date is None and day_of_month is None:
-                continue
-
-            if explicit_date is not None:
-                cell_date = explicit_date
-                if day_of_month is None:
-                    day_of_month = explicit_date.day
-            else:
-                cell_date = infer_entry_date(day_of_month, today)
-
-            content_lines = _extract_content_lines(parts)
-            counts = _count_participants(content_lines, cfg.exclude_keywords)
-            entry = _build_daily_entry(cell_date, day_of_month, counts, cfg)
-
-            LOGGER.debug("Parsed entry: %s", entry)
-            results.append(entry)
+        LOGGER.debug("Parsed entry: %s", entry)
+        results.append(entry)
 
     results.sort(key=lambda e: e.business_day)
     LOGGER.info(
@@ -715,6 +689,59 @@ def parse_day_entries(
         meets_criteria_count=sum(1 for e in results if e.meets)
     )
     return results
+
+
+def _iter_calendar_cells(table: Tag) -> Iterable[Tag]:
+    """Yield every calendar cell (<td>) from the provided table."""
+
+    for row in table.find_all("tr"):
+        cells = row.find_all("td")
+        for cell in cells:
+            if isinstance(cell, Tag):
+                yield cell
+
+
+def _parse_calendar_cell(
+    cell: Tag,
+    today: date,
+    cfg: Settings,
+) -> Optional[DailyEntry]:
+    parts = _extract_cell_parts(cell)
+    if not parts:
+        return None
+
+    explicit_date = _extract_explicit_cell_date(cell)
+    day_of_month = _extract_day_number(parts)
+    resolved_date, resolved_day = _resolve_cell_date(explicit_date, day_of_month, today)
+    if resolved_date is None or resolved_day is None:
+        return None
+
+    content_lines = _extract_content_lines(parts)
+    counts = _count_participants(content_lines, cfg.exclude_keywords)
+    return _build_daily_entry(resolved_date, resolved_day, counts, cfg)
+
+
+def _extract_cell_parts(cell: Tag) -> List[str]:
+    return [part.strip() for part in cell.stripped_strings if part.strip()]
+
+
+def _resolve_cell_date(
+    explicit_date: Optional[date],
+    day_of_month: Optional[int],
+    today: date,
+) -> Tuple[Optional[date], Optional[int]]:
+    if explicit_date is None and day_of_month is None:
+        return None, None
+
+    if explicit_date is not None:
+        resolved_day = day_of_month or explicit_date.day
+        return explicit_date, resolved_day
+
+    if day_of_month is None:
+        return None, None
+
+    inferred = infer_entry_date(day_of_month, today)
+    return inferred, day_of_month
 
 
 def log_parsing_snapshot(entries: Sequence[DailyEntry], logical_today: date) -> None:
