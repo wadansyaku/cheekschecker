@@ -55,20 +55,11 @@ jobs:
           restore-keys: |
             pip-test-${{ runner.os }}-
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            playwright-${{ runner.os }}-
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
-          python -m playwright install --with-deps chromium
 
       - name: Run tests with coverage
         run: |

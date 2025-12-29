@@ -60,7 +60,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+
+      - name: Install Playwright browsers (retry)
+        uses: nick-fields/retry@v3
+        with:
+          max_attempts: 3
+          retry_on: error
+          retry_wait_seconds: 20
+          command: python -m playwright install --with-deps chromium
 
       - name: Run monitor (scheduled)
         if: github.event_name != 'workflow_dispatch'
