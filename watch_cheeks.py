@@ -1062,6 +1062,98 @@ def save_masked_history(data: Dict[str, Any]) -> None:
     LOGGER.debug("history_masked.json updated")
 
 
+def _state_entry_to_daily_entry(business_day: date, state_entry: Dict[str, Any]) -> Optional[DailyEntry]:
+    counts = state_entry.get("counts")
+    if not isinstance(counts, dict):
+        return None
+
+    def _coerce_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _coerce_float(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    male = max(0, _coerce_int(counts.get("male")))
+    female = max(0, _coerce_int(counts.get("female")))
+    single = max(0, _coerce_int(counts.get("single_female")))
+    total_raw = counts.get("total")
+    total = _coerce_int(total_raw) if total_raw is not None else male + female
+    if total <= 0:
+        total = male + female
+
+    ratio_raw = counts.get("ratio")
+    ratio = _coerce_float(ratio_raw)
+    if ratio <= 0 and total:
+        ratio = female / total
+    ratio = max(0.0, min(1.0, ratio))
+
+    dow_label = _business_dow_label(business_day)
+    required_single = 5 if dow_label in {"Fri", "Sat"} else 3
+
+    return DailyEntry(
+        raw_date=business_day,
+        business_day=business_day,
+        day_of_month=business_day.day,
+        dow_en=dow_label,
+        male=male,
+        female=female,
+        single_female=single,
+        total=total,
+        ratio=round(ratio, 4),
+        considered=True,
+        meets=bool(state_entry.get("met", False)),
+        required_single=required_single,
+    )
+
+
+def _supplement_entries_from_state(
+    entries: Sequence[DailyEntry],
+    state: Dict[str, Any],
+    *,
+    logical_today: date,
+    days: int,
+) -> List[DailyEntry]:
+    """Fill gaps using cached state entries to keep long-range summaries accurate."""
+
+    if not state or "days" not in state:
+        return list(entries)
+
+    window_start = logical_today - timedelta(days=days * 2 - 1)
+    existing: Dict[date, DailyEntry] = {entry.business_day: entry for entry in entries}
+    supplemental: List[DailyEntry] = []
+
+    for key, value in state.get("days", {}).items():
+        try:
+            day = date.fromisoformat(str(key))
+        except ValueError:
+            continue
+        if day in existing:
+            continue
+        if day < window_start or day > logical_today:
+            continue
+        reconstructed = _state_entry_to_daily_entry(day, value)
+        if reconstructed is None:
+            continue
+        existing[day] = reconstructed
+        supplemental.append(reconstructed)
+
+    if supplemental:
+        LOGGER.info(
+            "Supplemented %d entries from cached state for summary coverage",
+            len(supplemental),
+        )
+
+    merged = list(existing.values())
+    merged.sort(key=lambda e: e.business_day)
+    return merged
+
+
 def check_robots_allow(settings: Settings) -> bool:
     if not settings.robots_enforce:
         return True
@@ -1574,7 +1666,9 @@ def summary(
     now = datetime.now(tz=JST)
     logical_today = derive_business_day(now, settings.rollover_hours)
     html, _ = asyncio.run(fetch_calendar_html(settings))
+    state = load_state(logical_today)
     entries = parse_day_entries(html, settings=settings, reference_date=logical_today)
+    entries = _supplement_entries_from_state(entries, state, logical_today=logical_today, days=days)
     update_masked_history(entries, settings=settings)
     bundle = select_summary_bundle(entries, logical_today=logical_today, days=days)
 
