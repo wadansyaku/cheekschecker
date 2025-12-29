@@ -1191,48 +1191,88 @@ def check_robots_allow(settings: Settings) -> bool:
 
 async def fetch_calendar_html(settings: Settings) -> Tuple[str, str]:
     LOGGER.info("Fetching calendar HTML from %s", settings.target_url)
+    try:
+        return await _fetch_calendar_html_playwright(settings)
+    except Exception as exc:  # pragma: no cover - fallback path is difficult to trigger in unit tests without Playwright
+        LOGGER.warning("Playwright fetch failed (%s); falling back to requests", exc)
+        return _fetch_calendar_html_requests(settings)
+
+
+def _build_user_agent(settings: Settings) -> str:
+    user_agent = DEFAULT_UA
+    if settings.ua_contact:
+        user_agent = f"{user_agent} {DEFAULT_USER_AGENT_ID} (+{settings.ua_contact})"
+    return user_agent
+
+
+async def _fetch_calendar_html_playwright(settings: Settings) -> Tuple[str, str]:
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        browser = await playwright.chromium.launch(
+            headless=True, args=["--disable-blink-features=AutomationControlled"]
+        )
         headers = {"Accept-Language": "ja,en-US;q=0.9,en;q=0.8"}
-        user_agent = DEFAULT_UA
-        if settings.ua_contact:
-            user_agent = f"{user_agent} {DEFAULT_USER_AGENT_ID} (+{settings.ua_contact})"
-        context = await browser.new_context(locale="ja-JP", user_agent=user_agent, extra_http_headers=headers)
-        page = await context.new_page()
-        await page.goto(settings.target_url, wait_until="domcontentloaded", timeout=60_000)
+        context = await browser.new_context(
+            locale="ja-JP",
+            user_agent=_build_user_agent(settings),
+            extra_http_headers=headers,
+        )
+        try:
+            page = await context.new_page()
+            await page.goto(settings.target_url, wait_until="domcontentloaded", timeout=60_000)
 
-        async def extract_from_frame(frame) -> Optional[str]:
-            try:
-                return await frame.evaluate(
-                    "() => { const table = document.querySelector(\"table[border='2']\"); return table ? table.outerHTML : null; }"
+            async def extract_from_frame(frame) -> Optional[str]:
+                try:
+                    return await frame.evaluate(
+                        "() => { const table = document.querySelector(\"table[border='2']\"); return table ? table.outerHTML : null; }"
+                    )
+                except Exception as exc:  # pragma: no cover
+                    LOGGER.debug("Frame extraction failed (%s): %s", getattr(frame, "url", ""), exc)
+                    return None
+
+            table_html: Optional[str] = await extract_from_frame(page.main_frame)
+            source_url = page.main_frame.url or settings.target_url
+            if not table_html:
+                for frame in page.frames:
+                    if frame is page.main_frame:
+                        continue
+                    table_html = await extract_from_frame(frame)
+                    if table_html:
+                        source_url = frame.url or source_url
+                        break
+            if table_html:
+                digest = hashlib.sha256(table_html.encode("utf-8", "ignore")).hexdigest()
+                LOGGER.info(
+                    "Fetched table outerHTML from frame=%s sha256=%s length=%d",
+                    source_url,
+                    digest,
+                    len(table_html),
                 )
-            except Exception as exc:  # pragma: no cover
-                LOGGER.debug("Frame extraction failed (%s): %s", getattr(frame, "url", ""), exc)
-                return None
+                return table_html, source_url
 
-        table_html: Optional[str] = await extract_from_frame(page.main_frame)
-        source_url = page.main_frame.url or settings.target_url
-        if not table_html:
-            for frame in page.frames:
-                if frame is page.main_frame:
-                    continue
-                table_html = await extract_from_frame(frame)
-                if table_html:
-                    source_url = frame.url or source_url
-                    break
-        if table_html:
-            digest = hashlib.sha256(table_html.encode("utf-8", "ignore")).hexdigest()
-            LOGGER.info("Fetched table outerHTML from frame=%s sha256=%s length=%d", source_url, digest, len(table_html))
+            html = await page.content()
+            digest = hashlib.sha256(html.encode("utf-8", "ignore")).hexdigest()
+            LOGGER.info("Fetched full page content sha256=%s length=%d", digest, len(html))
+            return html, source_url
+        finally:
             await context.close()
             await browser.close()
-            return table_html, source_url
 
-        html = await page.content()
-        digest = hashlib.sha256(html.encode("utf-8", "ignore")).hexdigest()
-        LOGGER.info("Fetched full page content sha256=%s length=%d", digest, len(html))
-        await context.close()
-        await browser.close()
-        return html, source_url
+
+def _fetch_calendar_html_requests(settings: Settings) -> Tuple[str, str]:
+    headers = {
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        "User-Agent": _build_user_agent(settings),
+    }
+    response = requests.get(settings.target_url, headers=headers, timeout=30)
+    response.raise_for_status()
+    digest = hashlib.sha256(response.text.encode("utf-8", "ignore")).hexdigest()
+    LOGGER.info(
+        "Fetched page via requests sha256=%s length=%d status=%s",
+        digest,
+        len(response.text),
+        response.status_code,
+    )
+    return response.text, settings.target_url
 
 
 def sanitize_html(html: str) -> str:
