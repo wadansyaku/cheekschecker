@@ -67,7 +67,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Playwright browsers (retry)
+      - name: Install Playwright browsers (retry, best-effort)
+        continue-on-error: true
         uses: nick-fields/retry@v3
         with:
           max_attempts: 3
