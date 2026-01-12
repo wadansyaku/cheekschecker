@@ -18,6 +18,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Validate workflows
+        run: python scripts/ci/check_workflows.py
+
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
