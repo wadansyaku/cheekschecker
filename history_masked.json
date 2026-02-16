@@ -409,38 +409,38 @@
       "ratio": "<40%"
     },
     "2026-02-10": {
-      "single": "0",
-      "female": "0",
-      "total": "<10",
+      "single": "5-6",
+      "female": "7-8",
+      "total": "20-29",
       "ratio": "<40%"
     },
     "2026-02-11": {
-      "single": "0",
-      "female": "1",
-      "total": "<10",
-      "ratio": "50±"
+      "single": "3-4",
+      "female": "5-6",
+      "total": "10-19",
+      "ratio": "<40%"
     },
     "2026-02-12": {
-      "single": "0",
-      "female": "0",
+      "single": "3-4",
+      "female": "3-4",
       "total": "<10",
-      "ratio": "<40%"
+      "ratio": "40±"
     },
     "2026-02-13": {
-      "single": "0",
-      "female": "0",
-      "total": "<10",
-      "ratio": "<40%"
+      "single": "9+",
+      "female": "9+",
+      "total": "30-49",
+      "ratio": "40±"
     },
     "2026-02-14": {
-      "single": "0",
-      "female": "0",
-      "total": "<10",
+      "single": "7-8",
+      "female": "9+",
+      "total": "30-49",
       "ratio": "<40%"
     },
     "2026-02-15": {
-      "single": "0",
-      "female": "0",
+      "single": "1",
+      "female": "2",
       "total": "<10",
       "ratio": "<40%"
     },
@@ -524,5 +524,5 @@
     }
   },
   "mask_level": 1,
-  "generated_at": "2026-02-09T13:00:23.971732+09:00"
+  "generated_at": "2026-02-16T12:49:36.591039+09:00"
 }
