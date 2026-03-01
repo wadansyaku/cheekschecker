@@ -1,10 +1,10 @@
 {
   "monthly": {
     "day_count": 8,
-    "generated_at": "2026-02-01T13:38:39.820168+09:00",
+    "generated_at": "2026-03-01T13:32:06.762366+09:00",
     "mask_level": 1,
-    "period_end": "2026-02-01",
-    "period_start": "2026-01-22",
+    "period_end": "2026-03-01",
+    "period_start": "2026-02-22",
     "stats": {
       "female": {
         "average": "0",
@@ -13,12 +13,12 @@
       },
       "ratio": {
         "average": "<40%",
-        "max": "60±",
+        "max": "40±",
         "median": "<40%"
       },
       "single": {
         "average": "0",
-        "max": "2",
+        "max": "0",
         "median": "0"
       },
       "total": {
@@ -32,20 +32,20 @@
       {
         "female": "2",
         "label": "1日(日)",
-        "ratio": "60±",
-        "single": "2",
+        "ratio": "40±",
+        "single": "0",
         "total": "<10"
       },
       {
         "female": "0",
-        "label": "28日(水)",
+        "label": "28日(土)",
         "ratio": "<40%",
         "single": "0",
         "total": "<10"
       },
       {
         "female": "0",
-        "label": "27日(火)",
+        "label": "27日(金)",
         "ratio": "<40%",
         "single": "0",
         "total": "<10"
@@ -66,7 +66,7 @@
       "日": {
         "female": "1",
         "ratio": "<40%",
-        "single": "1",
+        "single": "0",
         "total": "<10"
       },
       "月": {
