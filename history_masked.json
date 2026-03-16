@@ -577,39 +577,39 @@
       "ratio": "<40%"
     },
     "2026-03-10": {
-      "single": "0",
-      "female": "0",
-      "total": "<10",
+      "single": "2",
+      "female": "3-4",
+      "total": "10-19",
       "ratio": "<40%"
     },
     "2026-03-11": {
-      "single": "0",
-      "female": "0",
-      "total": "<10",
+      "single": "1",
+      "female": "3-4",
+      "total": "10-19",
       "ratio": "<40%"
     },
     "2026-03-12": {
-      "single": "0",
-      "female": "0",
-      "total": "<10",
+      "single": "3-4",
+      "female": "7-8",
+      "total": "20-29",
       "ratio": "<40%"
     },
     "2026-03-13": {
-      "single": "0",
-      "female": "0",
-      "total": "<10",
-      "ratio": "<40%"
+      "single": "7-8",
+      "female": "9+",
+      "total": "20-29",
+      "ratio": "40±"
     },
     "2026-03-14": {
-      "single": "0",
-      "female": "1",
-      "total": "<10",
-      "ratio": "50±"
+      "single": "5-6",
+      "female": "9+",
+      "total": "30-49",
+      "ratio": "80+%"
     },
     "2026-03-15": {
-      "single": "0",
-      "female": "0",
-      "total": "<10",
+      "single": "2",
+      "female": "5-6",
+      "total": "20-29",
       "ratio": "<40%"
     },
     "2026-03-16": {
@@ -695,8 +695,20 @@
       "female": "0",
       "total": "<10",
       "ratio": "<40%"
+    },
+    "2026-03-30": {
+      "single": "0",
+      "female": "0",
+      "total": "<10",
+      "ratio": "<40%"
+    },
+    "2026-03-31": {
+      "single": "0",
+      "female": "0",
+      "total": "<10",
+      "ratio": "<40%"
     }
   },
   "mask_level": 1,
-  "generated_at": "2026-03-09T12:42:35.147216+09:00"
+  "generated_at": "2026-03-16T13:12:13.055968+09:00"
 }
