@@ -45,16 +45,23 @@ from src.masking import (
     RatioBand,
     load_masking_config,
 )
+from src import public_state
+from src import public_summary
 
 # Initialize structured logging
 configure_logging(debug=bool(int(os.getenv("DEBUG_LOG", "0"))))
 LOGGER = get_logger(__name__)
 
-STATE_PATH = Path("state.json")
-HISTORY_MASKED_PATH = Path("history_masked.json")
+MONITOR_STATE_PATH = public_state.MONITOR_STATE_PATH
+LEGACY_STATE_PATH = public_state.LEGACY_STATE_PATH
+HISTORY_MASKED_PATH = public_state.HISTORY_MASKED_PATH
 JST = ZoneInfo("Asia/Tokyo")
 
 STEP_SUMMARY_TITLE_MONITOR = "Cheeks Monitor"
+STEP_SUMMARY_TITLES = {
+    7: "Cheeks Weekly Summary",
+    30: "Cheeks Monthly Summary",
+}
 
 DOW_EN = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 DOW_JP = {"Sun": "日", "Mon": "月", "Tue": "火", "Wed": "水", "Thu": "木", "Fri": "金", "Sat": "土"}
@@ -111,7 +118,6 @@ class Settings:
     exclude_keywords: Tuple[str, ...]
     include_dow: Tuple[str, ...]
     notify_mode: str
-    debug_summary: bool
     ping_channel: bool
     cooldown_minutes: int
     bonus_single_delta: int
@@ -123,7 +129,6 @@ class Settings:
     robots_enforce: bool
     ua_contact: Optional[str]
     masking_config: MaskingConfig = field(default=DEFAULT_MASKING_CONFIG)
-    history_masked_path: Path = field(default=HISTORY_MASKED_PATH)
 
 
 @dataclass
@@ -255,7 +260,10 @@ def load_settings() -> Settings:
     if notify_mode not in {"newly", "changed"}:
         LOGGER.warning("Unsupported NOTIFY_MODE=%s; falling back to newly", notify_mode)
         notify_mode = "newly"
-    debug_summary = os.getenv("DEBUG_SUMMARY") == "1"
+    if notify_mode == "changed":
+        LOGGER.warning(
+            "NOTIFY_MODE=changed is not guaranteed in public-safe persisted state; scheduled workflows should use newly"
+        )
     ping_channel = os.getenv("PING_CHANNEL", "1").strip() not in {"0", "false", "False"}
     cooldown_minutes = _parse_int(os.getenv("COOLDOWN_MINUTES"), DEFAULT_COOLDOWN_MINUTES)
     bonus_single_delta = _parse_int(os.getenv("BONUS_SINGLE_DELTA"), DEFAULT_BONUS_SINGLE_DELTA)
@@ -278,7 +286,6 @@ def load_settings() -> Settings:
         exclude_keywords=exclude_keywords,
         include_dow=include_dow,
         notify_mode=notify_mode,
-        debug_summary=debug_summary,
         ping_channel=ping_channel,
         cooldown_minutes=cooldown_minutes,
         bonus_single_delta=bonus_single_delta,
@@ -1011,54 +1018,36 @@ def mask_entry(
 
 
 def load_state(reference_date: date) -> Dict[str, Any]:
-    if STATE_PATH.exists():
-        try:
-            raw = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            LOGGER.error("Failed to decode state.json: %s", exc)
-            raw = {"etag": None, "last_modified": None, "days": {}}
-    else:
-        raw = {"etag": None, "last_modified": None, "days": {}}
-    return upgrade_state_keys(raw, reference_date)
+    return public_state.load_monitor_state(
+        reference_date=reference_date,
+        legacy_day_resolver=infer_entry_date,
+        path=MONITOR_STATE_PATH,
+        legacy_path=LEGACY_STATE_PATH,
+    )
 
 
 def upgrade_state_keys(state: Dict[str, Any], reference_date: date) -> Dict[str, Any]:
-    days = state.get("days")
-    if not isinstance(days, dict):
-        state["days"] = {}
-        return state
-    upgraded: Dict[str, Any] = {}
-    for key, value in days.items():
-        if isinstance(key, str) and DATE_KEY_PATTERN.match(key):
-            upgraded[key] = value
-            continue
-        if isinstance(key, str) and key.isdigit():
-            inferred = infer_entry_date(int(key), reference_date)
-            upgraded[inferred.isoformat()] = value
-            continue
-        LOGGER.debug("Dropping legacy state entry key=%s", key)
-    state["days"] = upgraded
-    return state
+    return public_state.migrate_legacy_state(
+        state,
+        reference_date=reference_date,
+        legacy_day_resolver=infer_entry_date,
+    )
 
 
 def save_state(state: Dict[str, Any]) -> None:
-    tmp = STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(STATE_PATH)
-    LOGGER.debug("State saved to %s", STATE_PATH)
+    public_state.save_monitor_state(state, path=MONITOR_STATE_PATH)
+    LOGGER.debug("Monitor state saved to %s", MONITOR_STATE_PATH)
 
 
 def load_masked_history() -> Dict[str, Any]:
-    if HISTORY_MASKED_PATH.exists():
-        try:
-            return json.loads(HISTORY_MASKED_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            LOGGER.warning("history_masked.json is invalid; resetting")
-    return {"days": {}, "mask_level": DEFAULT_MASK_LEVEL}
+    return public_state.load_masked_history(
+        HISTORY_MASKED_PATH,
+        default_mask_level=DEFAULT_MASK_LEVEL,
+    )
 
 
 def save_masked_history(data: Dict[str, Any]) -> None:
-    HISTORY_MASKED_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    public_state.save_masked_history(data, HISTORY_MASKED_PATH)
     LOGGER.debug("history_masked.json updated")
 
 
@@ -1316,13 +1305,6 @@ def _date_key(target: date) -> str:
 
 
 def _merge_state_counts(state_entry: Dict[str, Any], entry: DailyEntry) -> None:
-    state_entry["counts"] = {
-        "male": entry.male,
-        "female": entry.female,
-        "single_female": entry.single_female,
-        "total": entry.total,
-        "ratio": entry.ratio,
-    }
     state_entry["met"] = bool(entry.meets)
 
 
@@ -1441,12 +1423,18 @@ def _categorize_notifications(
 
     if entry.meets and settings.notify_mode == "changed":
         counts_before = prev_state.get("counts")
-        if counts_before and (
-            counts_before.get("female") != entry.female
-            or counts_before.get("single_female") != entry.single_female
-            or counts_before.get("total") != entry.total
-        ):
-            changed_counts.append(entry)
+        if counts_before:
+            if (
+                counts_before.get("female") != entry.female
+                or counts_before.get("single_female") != entry.single_female
+                or counts_before.get("total") != entry.total
+            ):
+                changed_counts.append(entry)
+        else:
+            LOGGER.debug(
+                "Skipping changed notification for %s because public-safe persisted state does not store prior counts",
+                entry.business_day,
+            )
 
 
 def process_notifications(
@@ -1544,6 +1532,42 @@ def select_summary_bundle(entries: Sequence[DailyEntry], *, logical_today: date,
     previous_days = [entry for entry in entries if prev_start <= entry.business_day <= prev_end]
     label = f"過去{days}日" if days != 30 else "過去30日"
     return SummaryBundle(label, period_days, previous_days)
+
+
+def _build_raw_summary_payload(
+    bundle: SummaryBundle,
+    *,
+    logical_today: date,
+    days: int,
+) -> Dict[str, Any]:
+    return {
+        "generated_at": datetime.now(tz=JST).isoformat(),
+        "period_label": bundle.period_label,
+        "window_days": days,
+        "logical_today": logical_today.isoformat(),
+        "days": [
+            {
+                "date": entry.business_day.isoformat(),
+                "single_female": entry.single_female,
+                "female": entry.female,
+                "male": entry.male,
+                "total": entry.total,
+                "ratio": entry.ratio,
+            }
+            for entry in bundle.period_days
+        ],
+        "previous_days": [
+            {
+                "date": entry.business_day.isoformat(),
+                "single_female": entry.single_female,
+                "female": entry.female,
+                "male": entry.male,
+                "total": entry.total,
+                "ratio": entry.ratio,
+            }
+            for entry in bundle.previous_days
+        ],
+    }
 
 
 def _weekday_profile(entries: Sequence[DailyEntry]) -> str:
@@ -1706,40 +1730,13 @@ def summary(
     now = datetime.now(tz=JST)
     logical_today = derive_business_day(now, settings.rollover_hours)
     html, _ = asyncio.run(fetch_calendar_html(settings))
-    state = load_state(logical_today)
     entries = parse_day_entries(html, settings=settings, reference_date=logical_today)
-    entries = _supplement_entries_from_state(entries, state, logical_today=logical_today, days=days)
     update_masked_history(entries, settings=settings)
     bundle = select_summary_bundle(entries, logical_today=logical_today, days=days)
+    raw_payload = _build_raw_summary_payload(bundle, logical_today=logical_today, days=days)
 
     if raw_output:
         raw_output.parent.mkdir(parents=True, exist_ok=True)
-        raw_payload = {
-            "generated_at": datetime.now(tz=JST).isoformat(),
-            "period_label": bundle.period_label,
-            "days": [
-                {
-                    "date": entry.business_day.isoformat(),
-                    "single_female": entry.single_female,
-                    "female": entry.female,
-                    "male": entry.male,
-                    "total": entry.total,
-                    "ratio": entry.ratio,
-                }
-                for entry in bundle.period_days
-            ],
-            "previous_days": [
-                {
-                    "date": entry.business_day.isoformat(),
-                    "single_female": entry.single_female,
-                    "female": entry.female,
-                    "male": entry.male,
-                    "total": entry.total,
-                    "ratio": entry.ratio,
-                }
-                for entry in bundle.previous_days
-            ],
-        }
         raw_output.write_text(json.dumps(raw_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         LOGGER.info("Summary raw dataset written to %s", raw_output)
 
@@ -1747,11 +1744,31 @@ def summary(
         LOGGER.info("Slack notification suppressed by flag")
         return
 
-    payload = generate_summary_payload(bundle, logical_today=logical_today, settings=settings)
-    if not payload:
-        LOGGER.info("No summary payload generated")
-        return
+    dataset = public_summary.raw_dataset_from_dict(raw_payload)
+    history_meta = load_masked_history()
+    period_key = "weekly" if days == 7 else "monthly"
+    context = public_summary.build_summary_context(
+        period_key,
+        dataset,
+        history_meta,
+        masking_config=settings.masking_config,
+    )
+    summary_title = STEP_SUMMARY_TITLES.get(days, f"Cheeks Summary {days}")
+    header_title = "週次サマリー" if days == 7 else "月次サマリー"
 
+    if context is None:
+        payload, fallback_text, sections = public_summary.build_placeholder_summary_payload(
+            f"Cheekschecker {header_title}",
+            "No data for this period / 集計対象なし",
+        )
+    else:
+        payload, fallback_text, sections = public_summary.build_slack_payload(
+            context,
+            header_title,
+            logical_today=logical_today,
+        )
+
+    append_step_summary(summary_title, sections, fallback_text)
     notify_slack(payload, settings)
 
 

@@ -6,6 +6,8 @@ import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+import watch_cheeks
+
 from watch_cheeks import (  # noqa: E402
     DEFAULT_ROLLOVER_HOURS,
     Settings,
@@ -24,7 +26,6 @@ def make_settings(**overrides) -> Settings:
         exclude_keywords=(),
         include_dow=(),
         notify_mode="newly",
-        debug_summary=False,
         ping_channel=False,
         cooldown_minutes=1,
         bonus_single_delta=2,
@@ -65,3 +66,37 @@ def test_monitor_writes_nested_sanitized_output(monkeypatch: pytest.MonkeyPatch,
 
     assert nested_path.exists()
     assert nested_path.read_text(encoding="utf-8").strip() == sanitize_html("<html></html>")
+
+
+def test_monitor_persists_etag_and_skips_second_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monitor_state_path = tmp_path / "monitor_state.json"
+    calls = {"fetch": 0}
+
+    async def fake_fetch_calendar_html(settings):
+        calls["fetch"] += 1
+        return "<html></html>", {}
+
+    class _HeadResponse:
+        headers = {"ETag": "same-etag", "Last-Modified": "same-modified"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", monitor_state_path)
+    monkeypatch.setattr("watch_cheeks.check_robots_allow", lambda settings: True)
+    monkeypatch.setattr("watch_cheeks.fetch_calendar_html", fake_fetch_calendar_html)
+    monkeypatch.setattr("watch_cheeks.parse_day_entries", lambda html, settings, reference_date: [])
+    monkeypatch.setattr("watch_cheeks.log_parsing_snapshot", lambda entries, logical_today: None)
+    monkeypatch.setattr(
+        "watch_cheeks.process_notifications",
+        lambda entries, settings, logical_today, state: watch_cheeks.save_state(state),
+    )
+    monkeypatch.setattr("watch_cheeks.update_masked_history", lambda entries, settings: None)
+    monkeypatch.setattr("watch_cheeks.requests.head", lambda url, timeout=10: _HeadResponse())
+
+    monitor(make_settings())
+    monitor(make_settings())
+
+    assert calls["fetch"] == 1
+    saved = monitor_state_path.read_text(encoding="utf-8")
+    assert "same-etag" in saved

@@ -5,8 +5,11 @@ on:
     - cron: '5/10 * * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: monitor-calendar
+  group: public-safe-state-writer
   cancel-in-progress: false
 
 env:
@@ -26,6 +29,8 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,6 +39,9 @@ jobs:
 
       - name: Display trigger info
         run: echo "trigger=${{ github.event_name }} ref=${{ github.ref }} sha=${{ github.sha }}"
+
+      - name: Sync public-safe artifacts
+        run: git pull --rebase --autostash origin ${{ github.ref_name }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -101,10 +109,34 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Upload monitor state snapshot
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitor-state
+          path: monitor_state.json
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Commit public-safe monitor artifacts
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "github-actions"
+          git pull --rebase --autostash origin ${{ github.ref_name }}
+          git add monitor_state.json history_masked.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "chore: update monitor state"
+          git push origin HEAD:${{ github.ref_name }}
+
   notify-failure:
     runs-on: ubuntu-latest
     needs: monitor
     if: failure()
+    permissions:
+      contents: read
     steps:
       - name: Notify Slack on failure
         env:

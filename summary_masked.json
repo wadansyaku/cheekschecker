@@ -3,6 +3,7 @@
     "day_count": 1,
     "generated_at": "2026-04-01T14:09:03.309269+09:00",
     "mask_level": 1,
+    "mode": "public-safe",
     "period_end": "2026-04-01",
     "period_start": "2026-04-01",
     "stats": {
@@ -49,12 +50,29 @@
         "single": "0",
         "total": "<10"
       }
+    },
+    "coverage": {
+      "current": {
+        "target_days": 30,
+        "observed_days": 1,
+        "raw_days": 1,
+        "masked_days": 0,
+        "missing_days": 29
+      },
+      "previous": {
+        "target_days": 30,
+        "observed_days": 0,
+        "raw_days": 0,
+        "masked_days": 0,
+        "missing_days": 30
+      }
     }
   },
   "weekly": {
     "day_count": 7,
     "generated_at": "2026-04-20T13:30:38.214247+09:00",
     "mask_level": 1,
+    "mode": "public-safe",
     "period_end": "2026-04-20",
     "period_start": "2026-04-14",
     "stats": {
@@ -150,6 +168,22 @@
         "ratio": "<40%",
         "single": "3-4",
         "total": "30-49"
+      }
+    },
+    "coverage": {
+      "current": {
+        "target_days": 7,
+        "observed_days": 7,
+        "raw_days": 7,
+        "masked_days": 0,
+        "missing_days": 0
+      },
+      "previous": {
+        "target_days": 7,
+        "observed_days": 7,
+        "raw_days": 7,
+        "masked_days": 0,
+        "missing_days": 0
       }
     }
   }

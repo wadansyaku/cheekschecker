@@ -27,7 +27,6 @@ BASE_SETTINGS = Settings(
     exclude_keywords=("スタッフ", "t-time", "pole"),
     include_dow=(),
     notify_mode="newly",
-    debug_summary=False,
     ping_channel=False,
     cooldown_minutes=180,
     bonus_single_delta=2,

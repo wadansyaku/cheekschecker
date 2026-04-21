@@ -1,5 +1,9 @@
 # Cheekschecker システム改善分析レポート
 
+> Historical note
+>
+> この文書は 2025-10-27 時点の分析メモです。現行の運用 contract とは一致しません。実装と運用の基準は `README.md` と `CURRENT_ARCHITECTURE.md` を参照してください。
+
 **作成日**: 2025-10-27
 **分析対象**: Cheekschecker 自動監視・通知システム
 

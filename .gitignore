@@ -4,6 +4,7 @@
 __pycache__/
 *.pyc
 .venv/
+state.json
 # Playwright
 playwright/.cache/
 # VS Code

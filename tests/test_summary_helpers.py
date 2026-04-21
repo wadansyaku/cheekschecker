@@ -1,66 +1,56 @@
-"""Tests for build_slack_payload helper functions."""
-
-import pytest
 from datetime import date
-from summarize import (
-    DailyRecord,
-    _format_date_range,
-    _format_latest_field,
-    _format_top_days_section,
-    _format_stats_field,
+
+from src.public_summary import (
+    RawDataset,
+    build_placeholder_summary_payload,
+    build_slack_payload,
+    build_summary_context,
 )
+from summarize import DailyRecord
 
 
-def test_format_date_range():
-    start = date(2025, 1, 15)
-    end = date(2025, 1, 21)
-    result = _format_date_range(start, end)
-    assert "01/15" in result
-    assert "01/21" in result
-    assert "〜" in result
-
-
-def test_format_latest_field():
-    record = DailyRecord(
-        business_day=date(2025, 1, 15),
-        single_female=3,
-        female=5,
-        total=10,
-        ratio=0.5,
+def test_build_placeholder_summary_payload() -> None:
+    payload, fallback, sections = build_placeholder_summary_payload(
+        "Cheekschecker 週次サマリー",
+        "No data for this period / 集計対象なし",
     )
-    lines = _format_latest_field(record)
-    assert len(lines) == 3
-    assert "01/15" in lines[0]
-    assert "単女3" in lines[1]
-    assert "50%" in lines[2]
+    assert "blocks" in payload
+    assert "Cheekschecker 週次サマリー" in fallback
+    assert sections[0][0] == "最新観測"
+    assert "public-safe approximation" in payload["blocks"][1]["elements"][0]["text"]
 
 
-def test_format_top_days_section_empty():
-    lines = _format_top_days_section([])
-    assert lines == ["• 該当なし"]
-
-
-def test_format_top_days_section_with_records():
-    record = DailyRecord(
-        business_day=date(2025, 1, 15),
-        single_female=3,
-        female=5,
-        total=10,
-        ratio=0.5,
+def test_build_slack_payload_includes_coverage_line() -> None:
+    dataset = RawDataset(
+        period_label="latest 7 days",
+        window_days=7,
+        logical_today=date(2025, 1, 21),
+        current=[
+            DailyRecord(
+                business_day=date(2025, 1, 21),
+                single_female=3,
+                female=5,
+                total=10,
+                ratio=0.5,
+            )
+        ],
+        previous=[],
     )
-    lines = _format_top_days_section([record])
-    assert len(lines) == 1
-    assert "単女3" in lines[0]
-    assert "女5/全10" in lines[0]
+    history_meta = {
+        "mask_level": 1,
+        "days": {
+            "2025-01-15": {"single": "3-4", "female": "5-6", "total": "10-19", "ratio": "50±"},
+            "2025-01-16": {"single": "3-4", "female": "5-6", "total": "10-19", "ratio": "50±"},
+            "2025-01-17": {"single": "3-4", "female": "5-6", "total": "10-19", "ratio": "50±"},
+            "2025-01-18": {"single": "3-4", "female": "5-6", "total": "10-19", "ratio": "50±"},
+            "2025-01-19": {"single": "3-4", "female": "5-6", "total": "10-19", "ratio": "50±"},
+            "2025-01-20": {"single": "3-4", "female": "5-6", "total": "10-19", "ratio": "50±"},
+        },
+    }
+    context = build_summary_context("weekly", dataset, history_meta)
+    assert context is not None
 
-
-def test_format_stats_field():
-    stats_single = {"average": 3.5, "median": 3.0, "max": 5.0}
-    stats_female = {"average": 5.2, "median": 5.0, "max": 8.0}
-    stats_ratio = {"average": 52.3, "median": 50.0, "max": 60.0}
-
-    lines = _format_stats_field(stats_single, stats_female, stats_ratio)
-    assert len(lines) == 3
-    assert "平均" in lines[0]
-    assert "中央値" in lines[1]
-    assert "最大" in lines[2]
+    payload, fallback, sections = build_slack_payload(context, "週次サマリー")
+    assert "カバレッジ" in fallback
+    assert any(section[0] == "傾向・曜日・カバレッジ" for section in sections)
+    assert "Top3 好条件日" in payload["blocks"][3]["text"]["text"]

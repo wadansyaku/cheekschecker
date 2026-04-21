@@ -72,7 +72,6 @@ def test_process_single_entry_creates_state():
         exclude_keywords=(),
         include_dow=(),
         notify_mode="newly",
-        debug_summary=False,
         ping_channel=False,
         cooldown_minutes=180,
         bonus_single_delta=2,
@@ -92,8 +91,8 @@ def test_process_single_entry_creates_state():
     assert action == "initial"
     assert stage == "initial"
     assert last_notified == 1000
-    assert "counts" in state_entry
-    assert state_entry["counts"]["female"] == 5
+    assert "counts" not in state_entry
+    assert state_entry["met"] is True
     assert state_entry["stage"] == "initial"
 
 
@@ -109,7 +108,6 @@ def test_categorize_notifications_adds_to_newly_met():
         exclude_keywords=(),
         include_dow=(),
         notify_mode="newly",
-        debug_summary=False,
         ping_channel=False,
         cooldown_minutes=180,
         bonus_single_delta=2,
@@ -147,7 +145,6 @@ def test_categorize_notifications_adds_to_changed_when_counts_differ():
         exclude_keywords=(),
         include_dow=(),
         notify_mode="changed",
-        debug_summary=False,
         ping_channel=False,
         cooldown_minutes=180,
         bonus_single_delta=2,
@@ -185,7 +182,6 @@ def test_categorize_notifications_handles_stage_action():
         exclude_keywords=(),
         include_dow=(),
         notify_mode="newly",
-        debug_summary=False,
         ping_channel=False,
         cooldown_minutes=180,
         bonus_single_delta=2,

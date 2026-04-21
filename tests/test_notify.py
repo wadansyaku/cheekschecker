@@ -26,7 +26,6 @@ def make_settings(**overrides):
         exclude_keywords=(),
         include_dow=(),
         notify_mode="newly",
-        debug_summary=False,
         ping_channel=False,
         cooldown_minutes=1,
         bonus_single_delta=2,
@@ -135,7 +134,7 @@ def test_process_notifications_filters_past(monkeypatch, tmp_path):
     def fake_notify(payload, settings):
         captured.append(payload)
 
-    monkeypatch.setattr("watch_cheeks.STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", tmp_path / "monitor_state.json")
     monkeypatch.setattr("watch_cheeks.notify_slack", fake_notify)
     monkeypatch.setattr("watch_cheeks.time", type("T", (), {"time": staticmethod(lambda: 2000)}))
 
@@ -150,6 +149,9 @@ def test_process_notifications_filters_past(monkeypatch, tmp_path):
     assert len(captured) == 1
     assert "初回" in captured[0]["text"]
     assert logical_today.strftime("%d") in captured[0]["text"]
+    saved = (tmp_path / "monitor_state.json").read_text(encoding="utf-8")
+    assert "\"counts\"" not in saved
+    assert "\"single_female\"" not in saved
 
 
 def test_process_notifications_limits_to_today_and_tomorrow(monkeypatch, tmp_path):
@@ -158,7 +160,7 @@ def test_process_notifications_limits_to_today_and_tomorrow(monkeypatch, tmp_pat
     def fake_notify(payload, settings):
         captured.append(payload)
 
-    monkeypatch.setattr("watch_cheeks.STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", tmp_path / "monitor_state.json")
     monkeypatch.setattr("watch_cheeks.notify_slack", fake_notify)
     monkeypatch.setattr("watch_cheeks.time", type("T", (), {"time": staticmethod(lambda: 2000)}))
 
