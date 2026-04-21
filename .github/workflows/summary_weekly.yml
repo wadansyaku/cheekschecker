@@ -118,7 +118,7 @@ jobs:
               exit 0
             fi
             git commit -m "chore: update weekly summary"
-            git push origin HEAD:${{ github.ref_name }}
+            git push origin HEAD:${{ github.ref_name }} || true
 
       - name: Notify commit failure
         if: ${{ failure() && steps.commit_archives.outcome == 'failure' }}
