@@ -1,6 +1,17 @@
 {
-  "generated_at": "2026-04-21T00:00:00+09:00",
+  "days": {
+    "2026-04-21": {
+      "last_notified_at": null,
+      "met": false,
+      "stage": "none"
+    },
+    "2026-04-22": {
+      "last_notified_at": null,
+      "met": false,
+      "stage": "none"
+    }
+  },
   "etag": null,
-  "last_modified": null,
-  "days": {}
+  "generated_at": "2026-04-21T23:05:18.177124+09:00",
+  "last_modified": null
 }
