@@ -14,9 +14,14 @@
       "last_notified_at": null,
       "met": false,
       "stage": "none"
+    },
+    "2026-04-24": {
+      "last_notified_at": null,
+      "met": false,
+      "stage": "none"
     }
   },
   "etag": null,
-  "generated_at": "2026-04-23T02:46:48.726082+09:00",
+  "generated_at": "2026-04-23T05:12:51.762865+09:00",
   "last_modified": null
 }
