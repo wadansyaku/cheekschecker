@@ -9,6 +9,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - 通知対象は「論理営業日で今日以降」のセルのみです。過去セルは記録されますが Slack 通知は抑止されます（営業日ロールオーバー前提）。
 - scheduled `monitor` の正式モードは `NOTIFY_MODE=newly` です。公開 workflow では `changed` 通知の継続保証は行いません。
 - `monitor` ワークフローでは Playwright を用いた取得、`monitor_state.json` の更新、`history_masked.json` の更新、Block Kit での投稿を行います。robots.txt が `Disallow` の場合は WARN ログを出して解析をスキップし、Slack には投稿しません。
+- scheduled workflow では upstream の一時的な接続失敗を warning skip として扱います。外部サイト timeout だけでは job failure にせず、step summary / Slack warning で観測します。
 - 取得前に HEAD リクエストで ETag / Last-Modified を確認し、未更新であればフェッチをスキップします。結果は GitHub Step Summary にも反映され、Slack と整合します。
 - Slack へ送った内容（または「該当なし」）は常に `GITHUB_STEP_SUMMARY` に同じ構成で追記されます。過去履歴を GitHub 上で確認しやすくしています。
 - 公開リポジトリに残す monitor 状態は `monitor_state.json` に限定し、`days[date]` には `met`、`stage`、`last_notified_at` だけを保存します。raw counts や exact ratio は保存しません。
@@ -47,6 +48,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 | `MASK_LEVEL` | マスキング強度 | `history_masked.json` / `summary_masked.json` の帯域粒度 |
 | `MASK_CONFIG_PATH` | マスキング設定 JSON | band 定義を差し替える場合のみ使用します |
 | `ROBOTS_ENFORCE` | robots.txt 準拠 | `1` で Disallow を尊重し、取得をスキップ（Slack 通知は無し） |
+| `ALLOW_FETCH_FAILURE` | 外部取得失敗の graceful degrade | scheduled workflow では `1`。upstream timeout を warning skip に落とし、manual dispatch では `0` のまま fail させます |
 | `UA_CONTACT` | User-Agent 連絡先 | 監視主体の連絡先メールなど |
 
 ## セットアップ
@@ -86,6 +88,7 @@ scripts/check_local.sh
 ## トラブルシュート
 - **Slack に投稿されない**：`SLACK_WEBHOOK_URL` が未設定か、Block Kit 投稿で失敗した可能性があります。ログの WARN/ERROR を確認し、必要なら手動で `python summarize.py --ping-only` を実行してください。
 - **push 失敗**：writer workflow は push failure を失敗として扱います。権限不足の場合は writer job に `contents: write` が付いているか確認してください。
+- **scheduled monitor / summary が timeout した**：`cheeks.nagoya` 側の一時障害なら warning skip になります。Slack warning と step summary を確認し、manual dispatch で再取得したい場合は `ALLOW_FETCH_FAILURE=0` のまま再実行してください。
 - **Playwright の依存不足**：`python -m playwright install --with-deps chromium` を再実行してください。CI では毎回実行しています。
 - **空データ期間**：`summarize.py` が「No data for this period / 集計対象なし」を Slack へ投稿し、ジョブは成功扱いになります。
 - **robots.txt で拒否された**：WARN ログが出て処理がスキップされます。対象 URL を見直すか、運用責任者に確認してください。

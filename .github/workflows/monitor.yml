@@ -83,12 +83,14 @@ jobs:
         if: github.event_name != 'workflow_dispatch'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALLOW_FETCH_FAILURE: '1'
         run: python watch_cheeks.py monitor
 
       - name: Run monitor with sanitized artifact
         if: github.event_name == 'workflow_dispatch'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALLOW_FETCH_FAILURE: '0'
         run: python watch_cheeks.py monitor --sanitized-output fetched_table_sanitized.html
 
       - name: Upload sanitized table

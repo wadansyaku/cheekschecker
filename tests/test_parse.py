@@ -37,6 +37,7 @@ BASE_SETTINGS = Settings(
     mask_level=1,
     robots_enforce=False,
     ua_contact=None,
+    allow_fetch_failure=False,
 )
 
 

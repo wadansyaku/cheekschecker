@@ -104,12 +104,40 @@ def handle_broken_data(period_title: str, webhook: str, summary_title: str) -> N
     send_slack_message(webhook, payload, fallback)
 
 
+def handle_source_unavailable(
+    period_title: str,
+    webhook: str,
+    summary_title: str,
+    detail: Optional[str] = None,
+) -> None:
+    message = "source unavailable / 外部サイト取得失敗"
+    if detail:
+        message = f"{message} ({detail})"
+    title = f"Cheekschecker {period_title}"
+    payload, fallback, sections = build_placeholder_summary_payload(title, message)
+    append_step_summary(summary_title, sections, fallback)
+    send_slack_message(webhook, payload, fallback)
+
+
 def run_summary(args: argparse.Namespace) -> int:
     history_meta = load_masked_history(args.history)
     dataset = load_raw_dataset(args.raw_data)
     period_title = "週次サマリー" if args.period == "weekly" else "月次サマリー"
     webhook = args.slack_webhook
     summary_title = STEP_SUMMARY_TITLES.get(args.period, period_title)
+
+    if dataset.fetch_status != "ok":
+        LOGGER.warning(
+            "Skipping summary generation because source was unavailable: %s",
+            dataset.fetch_error or dataset.fetch_status,
+        )
+        handle_source_unavailable(
+            period_title,
+            webhook,
+            summary_title,
+            dataset.fetch_error,
+        )
+        return 0
 
     try:
         context = build_summary_context(args.period, dataset, history_meta)

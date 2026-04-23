@@ -9,6 +9,7 @@ import pytest
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from watch_cheeks import (  # noqa: E402
+    CalendarFetchError,
     DEFAULT_ROLLOVER_HOURS,
     DailyEntry,
     Settings,
@@ -37,6 +38,7 @@ def make_settings(**overrides) -> Settings:
         mask_level=1,
         robots_enforce=False,
         ua_contact=None,
+        allow_fetch_failure=False,
     )
     return replace(base, **overrides) if overrides else base
 
@@ -176,3 +178,40 @@ def test_summary_uses_placeholder_when_context_is_missing(monkeypatch: pytest.Mo
     summary(make_settings(), days=7)
 
     assert captured == [{"text": "placeholder"}]
+
+
+def test_summary_writes_fetch_failure_marker_when_allowed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def failing_fetch_calendar_html(settings):
+        raise CalendarFetchError("connect timeout")
+
+    captured = []
+
+    monkeypatch.setattr("watch_cheeks.check_robots_allow", lambda settings: True)
+    monkeypatch.setattr("watch_cheeks.fetch_calendar_html", failing_fetch_calendar_html)
+    monkeypatch.setattr("watch_cheeks.notify_slack", lambda body, settings: captured.append(body))
+
+    raw_path = tmp_path / "weekly_summary_raw.json"
+    summary(
+        make_settings(allow_fetch_failure=True),
+        days=7,
+        raw_output=raw_path,
+        notify=False,
+    )
+
+    payload = json.loads(raw_path.read_text(encoding="utf-8"))
+    assert payload["fetch_status"] == "unavailable"
+    assert "connect timeout" in payload["fetch_error"]
+    assert captured == []
+
+
+def test_summary_raises_fetch_failure_when_not_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def failing_fetch_calendar_html(settings):
+        raise CalendarFetchError("connect timeout")
+
+    monkeypatch.setattr("watch_cheeks.check_robots_allow", lambda settings: True)
+    monkeypatch.setattr("watch_cheeks.fetch_calendar_html", failing_fetch_calendar_html)
+
+    with pytest.raises(CalendarFetchError):
+        summary(make_settings(), days=7, notify=False)

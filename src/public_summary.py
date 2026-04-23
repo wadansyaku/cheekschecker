@@ -44,6 +44,8 @@ class RawDataset:
     logical_today: Optional[date]
     current: List[DailyRecord]
     previous: List[DailyRecord]
+    fetch_status: str = "ok"
+    fetch_error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,8 @@ def raw_dataset_from_dict(raw: Dict[str, Any]) -> RawDataset:
         logical_today=_parse_iso_date(raw.get("logical_today")),
         current=[item for item in current if item is not None],
         previous=[item for item in previous if item is not None],
+        fetch_status=str(raw.get("fetch_status") or "ok"),
+        fetch_error=str(raw.get("fetch_error") or "").strip() or None,
     )
 
 

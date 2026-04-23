@@ -12,6 +12,7 @@
 - GitHub Actions の scheduled `monitor` は `NOTIFY_MODE=newly` を正式仕様とします。
 - `changed` 通知は公開 workflow の継続状態だけでは正確に保証できないため、public-safe scheduled mode の保証対象から外します。
 - `monitor` は `monitor_state.json` と `history_masked.json` を更新し、同一 writer transaction で commit / push します。
+- upstream の一時的な接続失敗は scheduled run では warning skip として扱い、job failure にはしません。manual dispatch は fail-fast のまま維持します。
 
 ## Public-safe summary
 - `watch_cheeks.py summary` は raw dataset を採取しつつ、public-safe な履歴更新を行う収集フェーズです。

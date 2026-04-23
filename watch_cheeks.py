@@ -128,7 +128,12 @@ class Settings:
     mask_level: int
     robots_enforce: bool
     ua_contact: Optional[str]
+    allow_fetch_failure: bool
     masking_config: MaskingConfig = field(default=DEFAULT_MASKING_CONFIG)
+
+
+class CalendarFetchError(RuntimeError):
+    """Raised when both primary and fallback fetch paths fail."""
 
 
 @dataclass
@@ -274,6 +279,7 @@ def load_settings() -> Settings:
     mask_level = _parse_int(os.getenv("MASK_LEVEL"), DEFAULT_MASK_LEVEL)
     robots_enforce = os.getenv("ROBOTS_ENFORCE", "0") in {"1", "true", "True"}
     ua_contact = os.getenv("UA_CONTACT")
+    allow_fetch_failure = os.getenv("ALLOW_FETCH_FAILURE", "0") in {"1", "true", "True"}
     mask_config_path = os.getenv("MASK_CONFIG_PATH")
     masking_config = load_masking_config(mask_config_path)
 
@@ -296,6 +302,7 @@ def load_settings() -> Settings:
         mask_level=mask_level,
         robots_enforce=robots_enforce,
         ua_contact=ua_contact,
+        allow_fetch_failure=allow_fetch_failure,
         masking_config=masking_config,
     )
     LOGGER.debug("Loaded settings: %s", settings)
@@ -1184,7 +1191,12 @@ async def fetch_calendar_html(settings: Settings) -> Tuple[str, str]:
         return await _fetch_calendar_html_playwright(settings)
     except Exception as exc:  # pragma: no cover - fallback path is difficult to trigger in unit tests without Playwright
         LOGGER.warning("Playwright fetch failed (%s); falling back to requests", exc)
-        return _fetch_calendar_html_requests(settings)
+        try:
+            return _fetch_calendar_html_requests(settings)
+        except Exception as fallback_exc:
+            raise CalendarFetchError(
+                f"calendar fetch failed via playwright and requests: {fallback_exc}"
+            ) from fallback_exc
 
 
 def _build_user_agent(settings: Settings) -> str:
@@ -1262,6 +1274,69 @@ def _fetch_calendar_html_requests(settings: Settings) -> Tuple[str, str]:
         response.status_code,
     )
     return response.text, settings.target_url
+
+
+def _short_error_message(exc: Exception, *, limit: int = 220) -> str:
+    message = " ".join(str(exc).split()).strip() or exc.__class__.__name__
+    if len(message) <= limit:
+        return message
+    return message[: limit - 3] + "..."
+
+
+def _build_fetch_failure_payload(
+    *,
+    title: str,
+    message: str,
+    detail: str,
+    target_url: str,
+) -> Tuple[Dict[str, Any], str, List[Tuple[str, List[str]]]]:
+    fallback = f"{title}: {message}"
+    sections = [
+        ("実行結果", [message, f"detail: {detail}"]),
+    ]
+    payload = {
+        "text": fallback,
+        "blocks": [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": title, "emoji": False},
+            },
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*実行結果*\n{message}\n`{detail}`"},
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "カレンダーを開く"},
+                        "url": target_url,
+                    }
+                ],
+            },
+        ],
+    }
+    return payload, fallback, sections
+
+
+def _build_summary_fetch_failure_raw_payload(
+    *,
+    days: int,
+    logical_today: date,
+    error_message: str,
+) -> Dict[str, Any]:
+    label = f"過去{days}日" if days != 30 else "過去30日"
+    return {
+        "generated_at": datetime.now(tz=JST).isoformat(),
+        "period_label": label,
+        "window_days": days,
+        "logical_today": logical_today.isoformat(),
+        "days": [],
+        "previous_days": [],
+        "fetch_status": "unavailable",
+        "fetch_error": error_message,
+    }
 
 
 def sanitize_html(html: str) -> str:
@@ -1704,7 +1779,23 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
         )
         return
 
-    html, _ = asyncio.run(fetch_calendar_html(settings))
+    try:
+        html, _ = asyncio.run(fetch_calendar_html(settings))
+    except CalendarFetchError as exc:
+        if not settings.allow_fetch_failure:
+            raise
+        detail = _short_error_message(exc)
+        message = "外部サイト取得失敗のため今回の monitor はスキップしました"
+        payload, fallback, sections = _build_fetch_failure_payload(
+            title="Cheekschecker Monitor",
+            message=message,
+            detail=detail,
+            target_url=settings.target_url,
+        )
+        LOGGER.warning("%s detail=%s", message, detail)
+        append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, fallback)
+        notify_slack(payload, settings)
+        return
     if output_sanitized:
         output_sanitized.parent.mkdir(parents=True, exist_ok=True)
         output_sanitized.write_text(sanitize_html(html), encoding="utf-8")
@@ -1729,7 +1820,45 @@ def summary(
 
     now = datetime.now(tz=JST)
     logical_today = derive_business_day(now, settings.rollover_hours)
-    html, _ = asyncio.run(fetch_calendar_html(settings))
+    try:
+        html, _ = asyncio.run(fetch_calendar_html(settings))
+    except CalendarFetchError as exc:
+        if not settings.allow_fetch_failure:
+            raise
+        detail = _short_error_message(exc)
+        if raw_output:
+            raw_output.parent.mkdir(parents=True, exist_ok=True)
+            raw_output.write_text(
+                json.dumps(
+                    _build_summary_fetch_failure_raw_payload(
+                        days=days,
+                        logical_today=logical_today,
+                        error_message=detail,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            LOGGER.warning(
+                "Summary source unavailable; wrote failure marker to %s detail=%s",
+                raw_output,
+                detail,
+            )
+        else:
+            LOGGER.warning("Summary source unavailable detail=%s", detail)
+        if notify:
+            summary_title = STEP_SUMMARY_TITLES.get(days, f"Cheeks Summary {days}")
+            header_title = "週次サマリー" if days == 7 else "月次サマリー"
+            payload, fallback_text, sections = _build_fetch_failure_payload(
+                title=f"Cheekschecker {header_title}",
+                message="外部サイト取得失敗のため今回の summary はスキップしました",
+                detail=detail,
+                target_url=settings.target_url,
+            )
+            append_step_summary(summary_title, sections, fallback_text)
+            notify_slack(payload, settings)
+        return
     entries = parse_day_entries(html, settings=settings, reference_date=logical_today)
     update_masked_history(entries, settings=settings)
     bundle = select_summary_bundle(entries, logical_today=logical_today, days=days)
