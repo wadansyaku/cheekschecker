@@ -37,6 +37,7 @@ def make_settings(**overrides):
         robots_enforce=False,
         ua_contact=None,
         allow_fetch_failure=False,
+        head_skip_max_age_minutes=180,
     )
     return replace(base, **overrides) if overrides else base
 

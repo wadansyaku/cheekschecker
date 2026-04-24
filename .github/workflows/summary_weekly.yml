@@ -91,7 +91,7 @@ jobs:
         run: python watch_cheeks.py summary --days 7 --raw-output weekly_summary_raw.json --no-notify
 
       - name: Upload raw weekly summary
-        if: always()
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: weekly-summary-raw

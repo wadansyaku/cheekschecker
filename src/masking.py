@@ -90,6 +90,34 @@ def _parse_ratio_thresholds(raw: Sequence[Any]) -> Tuple[float, ...]:
     return tuple(sorted(thresholds))
 
 
+def _validate_band_sequence(name: str, bands: Sequence[Band], *, ratio: bool = False) -> None:
+    previous_high: int | float | None = None
+    for index, (low, high, label) in enumerate(bands):
+        if not label:
+            LOGGER.warning("masking config %s has empty label at index=%s", name, index)
+        if high is not None and high < low:
+            LOGGER.warning("masking config %s has high < low at index=%s", name, index)
+        if ratio:
+            high_for_check = high if high is not None else low
+            if low < 0 or high_for_check > 1:
+                LOGGER.warning("masking config %s has ratio bound outside 0..1 at index=%s", name, index)
+        if previous_high is not None and low <= previous_high:
+            LOGGER.warning("masking config %s has overlapping or unsorted bands at index=%s", name, index)
+        if high is None and index < len(bands) - 1:
+            LOGGER.warning("masking config %s has open-ended band before final index=%s", name, index)
+        previous_high = high if high is not None else previous_high
+
+
+def _validate_ratio_thresholds(thresholds: Sequence[float]) -> None:
+    previous: float | None = None
+    for index, value in enumerate(thresholds):
+        if value < 0 or value > 1:
+            LOGGER.warning("masking config level2_ratio_thresholds has value outside 0..1 at index=%s", index)
+        if previous is not None and value <= previous:
+            LOGGER.warning("masking config level2_ratio_thresholds has duplicate or unsorted value at index=%s", index)
+        previous = value
+
+
 def load_masking_config(path: Optional[str]) -> "MaskingConfig":
     """Load masking configuration from JSON, falling back to defaults."""
 
@@ -130,7 +158,7 @@ def load_masking_config(path: Optional[str]) -> "MaskingConfig":
         LOGGER.warning("masking config level2_ratio_thresholds must be a sequence")
         level2_ratio_thresholds = ()
 
-    return MaskingConfig(
+    config = MaskingConfig(
         count_bands=(count_bands or DEFAULT_MASKING_CONFIG.count_bands),
         total_bands=(total_bands or DEFAULT_MASKING_CONFIG.total_bands),
         ratio_bands=(ratio_bands or DEFAULT_MASKING_CONFIG.ratio_bands),
@@ -140,6 +168,11 @@ def load_masking_config(path: Optional[str]) -> "MaskingConfig":
             level2_ratio_thresholds or DEFAULT_MASKING_CONFIG.level2_ratio_thresholds
         ),
     )
+    _validate_band_sequence("count_bands", config.count_bands)
+    _validate_band_sequence("total_bands", config.total_bands)
+    _validate_band_sequence("ratio_bands", config.ratio_bands, ratio=True)
+    _validate_ratio_thresholds(config.level2_ratio_thresholds)
+    return config
 
 
 DEFAULT_MASKING_CONFIG = MaskingConfig(
@@ -190,4 +223,3 @@ __all__ = [
     "DEFAULT_MASKING_CONFIG",
     "load_masking_config",
 ]
-

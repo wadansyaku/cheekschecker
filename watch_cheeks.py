@@ -16,27 +16,27 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import calendar
 import hashlib
 import json
 import logging
 import os
-import re
-import statistics
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
-from bs4 import BeautifulSoup
-from bs4.element import Tag
 from playwright.async_api import async_playwright
-from zoneinfo import ZoneInfo
 
+from src.calendar_parser import (
+    business_dow_label as _business_dow_label,
+    infer_entry_date,
+    parse_day_entries as _parse_day_entries,
+)
+from src.domain import DOW_EN, DOW_JP, DailyEntry, JST
 from src.logging_config import configure_logging, get_logger
 from src.masking import (
     DEFAULT_MASKING_CONFIG,
@@ -45,6 +45,11 @@ from src.masking import (
     RatioBand,
     load_masking_config,
 )
+from src.notifications import (
+    append_step_summary as _append_step_summary,
+    send_slack_message as _send_slack_message,
+)
+from src.notification_state import evaluate_stage_transition
 from src import public_state
 from src import public_summary
 
@@ -55,7 +60,6 @@ LOGGER = get_logger(__name__)
 MONITOR_STATE_PATH = public_state.MONITOR_STATE_PATH
 LEGACY_STATE_PATH = public_state.LEGACY_STATE_PATH
 HISTORY_MASKED_PATH = public_state.HISTORY_MASKED_PATH
-JST = ZoneInfo("Asia/Tokyo")
 
 STEP_SUMMARY_TITLE_MONITOR = "Cheeks Monitor"
 STEP_SUMMARY_TITLES = {
@@ -63,42 +67,20 @@ STEP_SUMMARY_TITLES = {
     30: "Cheeks Monthly Summary",
 }
 
-DOW_EN = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
-DOW_JP = {"Sun": "日", "Mon": "月", "Tue": "火", "Wed": "水", "Thu": "木", "Fri": "金", "Sat": "土"}
-
 DEFAULT_ROLLOVER_HOURS = {"Sun": 2, "Mon": 0, "Tue": 5, "Wed": 5, "Thu": 5, "Fri": 6, "Sat": 6}
 DEFAULT_COOLDOWN_MINUTES = 180
 DEFAULT_BONUS_SINGLE_DELTA = 2
 DEFAULT_BONUS_RATIO_THRESHOLD = 0.50
 DEFAULT_NOTIFY_FROM_TODAY = 1
 DEFAULT_MASK_LEVEL = 1
+DEFAULT_HEAD_SKIP_MAX_AGE_MINUTES = 180
+DEFAULT_WARNING_THROTTLE_MINUTES = 180
+MONITOR_FETCH_FAILURE_WARNING_KEY = "monitor_fetch_failure"
+FETCH_UNAVAILABLE_WARNING_CATEGORY = "fetch_unavailable"
 
 DEFAULT_TARGET_URL = "http://cheeks.nagoya/yoyaku.shtml"
 DEFAULT_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 DEFAULT_USER_AGENT_ID = "CheekscheckerBot/1.0"
-
-DATE_KEY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-DATE_ATTR_CANDIDATES = (
-    "data-date",
-    "data-day",
-    "data-date-iso",
-    "data-day-iso",
-    "data-full-date",
-)
-FULLWIDTH_TO_ASCII = str.maketrans({
-    "０": "0",
-    "１": "1",
-    "２": "2",
-    "３": "3",
-    "４": "4",
-    "５": "5",
-    "６": "6",
-    "７": "7",
-    "８": "8",
-    "９": "9",
-})
-MULTIPLIER_PATTERN = re.compile(r"(?:[×xX＊*])\s*([0-9０-９]+)")
-GROUP_COUNT_PATTERN = re.compile(r"([0-9０-９]+)\s*(?:人|名|組)")
 
 MASK_COUNT_BANDS: list[CountBand] = list(DEFAULT_MASKING_CONFIG.count_bands)
 MASK_TOTAL_BANDS: list[CountBand] = list(DEFAULT_MASKING_CONFIG.total_bands)
@@ -129,27 +111,13 @@ class Settings:
     robots_enforce: bool
     ua_contact: Optional[str]
     allow_fetch_failure: bool
+    head_skip_max_age_minutes: int
+    warning_throttle_minutes: int = DEFAULT_WARNING_THROTTLE_MINUTES
     masking_config: MaskingConfig = field(default=DEFAULT_MASKING_CONFIG)
 
 
 class CalendarFetchError(RuntimeError):
     """Raised when both primary and fallback fetch paths fail."""
-
-
-@dataclass
-class DailyEntry:
-    raw_date: date
-    business_day: date
-    day_of_month: int
-    dow_en: str
-    male: int
-    female: int
-    single_female: int
-    total: int
-    ratio: float
-    considered: bool
-    meets: bool
-    required_single: int
 
 
 @dataclass
@@ -162,25 +130,13 @@ class SummaryBundle:
 
 
 def append_step_summary(title: str, sections: Sequence[Tuple[str, Sequence[str]]], fallback: str) -> None:
-    path = os.getenv("GITHUB_STEP_SUMMARY")
-    if not path:
-        return
-    try:
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(f"## {title}\n\n")
-            if sections:
-                for heading, lines in sections:
-                    handle.write(f"### {heading}\n\n")
-                    if lines:
-                        for line in lines:
-                            handle.write(f"- {line}\n")
-                    else:
-                        handle.write("- 該当なし\n")
-                    handle.write("\n")
-            else:
-                handle.write(f"{fallback or '該当なし'}\n\n")
-    except OSError as exc:  # pragma: no cover - filesystem edge cases
-        LOGGER.debug("Failed to append step summary: %s", exc)
+    _append_step_summary(
+        title,
+        sections,
+        fallback,
+        empty_fallback="該当なし",
+        logger=LOGGER,
+    )
 
 
 def _parse_keywords(raw: str) -> Tuple[str, ...]:
@@ -253,6 +209,19 @@ def _parse_rollover_hours(raw: Optional[str]) -> Dict[str, int]:
     return merged
 
 
+def _settings_for_log(settings: Settings) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    for item in fields(settings):
+        value = getattr(settings, item.name)
+        if item.name == "slack_webhook_url":
+            payload[item.name] = "<set>" if value else None
+        elif item.name == "masking_config":
+            payload[item.name] = "<custom>" if value != DEFAULT_MASKING_CONFIG else "<default>"
+        else:
+            payload[item.name] = value
+    return payload
+
+
 def load_settings() -> Settings:
     target_url = os.getenv("TARGET_URL", DEFAULT_TARGET_URL)
     slack_webhook = os.getenv("SLACK_WEBHOOK_URL")
@@ -280,6 +249,14 @@ def load_settings() -> Settings:
     robots_enforce = os.getenv("ROBOTS_ENFORCE", "0") in {"1", "true", "True"}
     ua_contact = os.getenv("UA_CONTACT")
     allow_fetch_failure = os.getenv("ALLOW_FETCH_FAILURE", "0") in {"1", "true", "True"}
+    head_skip_max_age_minutes = _parse_int(
+        os.getenv("HEAD_SKIP_MAX_AGE_MINUTES"),
+        DEFAULT_HEAD_SKIP_MAX_AGE_MINUTES,
+    )
+    warning_throttle_minutes = _parse_int(
+        os.getenv("WARNING_THROTTLE_MINUTES"),
+        DEFAULT_WARNING_THROTTLE_MINUTES,
+    )
     mask_config_path = os.getenv("MASK_CONFIG_PATH")
     masking_config = load_masking_config(mask_config_path)
 
@@ -303,14 +280,12 @@ def load_settings() -> Settings:
         robots_enforce=robots_enforce,
         ua_contact=ua_contact,
         allow_fetch_failure=allow_fetch_failure,
+        head_skip_max_age_minutes=head_skip_max_age_minutes,
+        warning_throttle_minutes=warning_throttle_minutes,
         masking_config=masking_config,
     )
-    LOGGER.debug("Loaded settings: %s", settings)
+    LOGGER.debug("Loaded settings: %s", _settings_for_log(settings))
     return settings
-
-
-def _business_dow_label(dt: date) -> str:
-    return DOW_EN[(dt.weekday() + 1) % 7]
 
 
 def derive_business_day(now: datetime, rollover_hours: Dict[str, int]) -> date:
@@ -328,434 +303,14 @@ def derive_business_day(now: datetime, rollover_hours: Dict[str, int]) -> date:
     return business_day
 
 
-def _should_exclude_text(text: str, keywords: Sequence[str]) -> bool:
-    lowered = text.lower()
-    for keyword in keywords:
-        if not keyword:
-            continue
-        if "スタッフ" in keyword or "staff" in keyword:
-            continue
-        if keyword in lowered:
-            return True
-    return False
-
-
-def _extract_numeric_counts(text: str) -> List[int]:
-    counts: List[int] = []
-    for match in MULTIPLIER_PATTERN.finditer(text):
-        digits = match.group(1).translate(FULLWIDTH_TO_ASCII)
-        try:
-            counts.append(int(digits))
-        except ValueError:
-            continue
-    for match in GROUP_COUNT_PATTERN.finditer(text):
-        digits = match.group(1).translate(FULLWIDTH_TO_ASCII)
-        try:
-            counts.append(int(digits))
-        except ValueError:
-            continue
-    return counts
-
-
-def _count_participant_line(text: str) -> Tuple[int, int, int]:
-    male_count = text.count("♂")
-    female_symbols = text.count("♀")
-    numbers = _extract_numeric_counts(text)
-
-    female_count = female_symbols
-    if female_symbols > 0 and male_count == 0:
-        female_count = max(female_symbols, max(numbers) if numbers else female_symbols)
-    numeric_value = max(numbers) if numbers else female_count
-    single = 1 if female_count == 1 and male_count == 0 and numeric_value <= 1 else 0
-    return male_count, female_count, single
-
-
-def infer_entry_date(day: int, reference_date: date) -> date:
-    if day < 1:
-        day = 1
-    year = reference_date.year
-    month = reference_date.month
-
-    # First, try the current month
-    last_day_current = calendar.monthrange(year, month)[1]
-    current_month_date = date(year, month, min(day, last_day_current))
-
-    # Calculate days difference
-    days_diff = (current_month_date - reference_date).days
-
-    # If the date is significantly in the past (more than 15 days ago),
-    # it's likely from next month
-    if days_diff < -15:
-        if month == 12:
-            next_year, next_month = year + 1, 1
-        else:
-            next_year, next_month = year, month + 1
-        last_day_next = calendar.monthrange(next_year, next_month)[1]
-        return date(next_year, next_month, min(day, last_day_next))
-
-    # If the date is significantly in the future (more than 20 days ahead),
-    # it's likely from previous month
-    if days_diff > 20:
-        if month == 1:
-            prev_year, prev_month = year - 1, 12
-        else:
-            prev_year, prev_month = year, month - 1
-        last_day_prev = calendar.monthrange(prev_year, prev_month)[1]
-        return date(prev_year, prev_month, min(day, last_day_prev))
-
-    # Otherwise, return the current month date
-    return current_month_date
-
-
-def _extract_calendar_table(html: str) -> Optional[Tag]:
-    """Extract the reservation calendar table from HTML.
-
-    The official site occasionally tweaks the markup – for example changing the
-    ``border`` attribute or wrapping the calendar in additional layout tables –
-    which previously caused the parser to bail out early.  We therefore search
-    for the first table that *looks* like a calendar instead of relying on a
-    single attribute.
-
-    Args:
-        html: HTML content to parse
-
-    Returns:
-        Table element if found, ``None`` otherwise
-    """
-
-    soup = BeautifulSoup(html, "lxml")
-
-    # Prefer the historic ``border="2"`` table for backwards compatibility.
-    table = soup.find("table", attrs={"border": "2"})
-    if table and isinstance(table, Tag):
-        return table
-
-    # Fallback: look for a table that contains enough day numbers and weekday
-    # labels to plausibly be the reservation calendar.
-    dow_tokens = set(DOW_JP.values()) | set(DOW_EN)
-    for candidate in soup.find_all("table"):
-        if not isinstance(candidate, Tag):
-            continue
-        strings = list(candidate.stripped_strings)
-        if not strings:
-            continue
-
-        day_hits = 0
-        dow_hits = 0
-        for text in strings:
-            stripped = text.strip()
-            if not stripped:
-                continue
-            if stripped in dow_tokens:
-                dow_hits += 1
-            else:
-                try:
-                    value = int(stripped)
-                except ValueError:
-                    continue
-                if 1 <= value <= 31:
-                    day_hits += 1
-
-        if day_hits >= 10 and dow_hits >= 3:
-            return candidate
-
-    LOGGER.warning("Calendar table not found")
-    return None
-
-
-def _extract_day_number(parts: List[str]) -> Optional[int]:
-    """Extract day number from cell text parts.
-
-    Args:
-        parts: List of text parts from cell
-
-    Returns:
-        Day number (1-31) if found, None otherwise
-    """
-    for part in parts:
-        match = re.search(r"(\d{1,2})", part)
-        if match:
-            return int(match.group(1))
-    return None
-
-
-def _parse_date_attribute(raw: str) -> Optional[date]:
-    cleaned = raw.strip()
-    if not cleaned:
-        return None
-
-    iso_candidate = cleaned.split()[0]
-    if "T" in iso_candidate:
-        iso_candidate = iso_candidate.split("T", 1)[0]
-    iso_candidate = iso_candidate.replace("/", "-")
-
-    try:
-        return datetime.fromisoformat(iso_candidate).date()
-    except ValueError:
-        match = re.search(r"(\d{4})\D(\d{1,2})\D(\d{1,2})", cleaned)
-        if match:
-            year, month, day = map(int, match.groups())
-            return date(year, month, day)
-    return None
-
-
-def _extract_explicit_cell_date(cell: Tag) -> Optional[date]:
-    """Extract explicit date hints from attributes within a cell."""
-
-    for element in [cell, *cell.find_all(True)]:
-        for attr in DATE_ATTR_CANDIDATES:
-            raw = element.get(attr)
-            if not raw:
-                continue
-            parsed = _parse_date_attribute(str(raw))
-            if parsed:
-                return parsed
-    return None
-
-
-def _extract_content_lines(parts: List[str]) -> List[str]:
-    """Extract content lines excluding dates and day-of-week labels.
-
-    Args:
-        parts: List of text parts from cell
-
-    Returns:
-        Filtered content lines
-    """
-    content_lines: List[str] = []
-    for part in parts:
-        if re.fullmatch(r"\d{1,2}", part):
-            continue
-        if part.lower() in {"sun", "mon", "tue", "wed", "thu", "fri", "sat"}:
-            continue
-        content_lines.append(part)
-    return content_lines
-
-
-def _normalise_participant_label(text: str) -> str:
-    """Normalise participant label text for duplicate detection."""
-
-    translated = text.translate(FULLWIDTH_TO_ASCII)
-    base = re.sub(r"[♂♀]", "", translated).replace("　", " ").strip()
-    if not base:
-        return ""
-
-    # Focus on the first token (name/label) before supplementary notes such as
-    # "(追記です)" or " 3人です" to avoid treating updates as separate people.
-    token = re.split(r"[\s(（\[\{／/|｜・]+", base, maxsplit=1)[0]
-    token = token or base
-
-    normalised = token.lower()
-    normalised = re.sub(r"[×x＊*]+", "", normalised)
-    normalised = re.sub(r"[0-9]+", "", normalised)
-    normalised = normalised.replace("人", "").replace("名", "").replace("組", "")
-    normalised = re.sub(r"[()（）\[\]{}<>『』「」【】、。,.!！?？:：;；~〜'\"`´^＾\\-]", "", normalised)
-    normalised = normalised.strip()
-    if normalised:
-        return normalised
-
-    fallback = re.sub(r"[()（）\[\]{}<>『』「」【】、。,.!！?？:：;；~〜'\"`´^＾\\|／/・-]", "", base.lower())
-    fallback = re.sub(r"[0-9]+", "", fallback)
-    fallback = fallback.replace("人", "").replace("名", "").replace("組", "")
-    fallback = fallback.strip()
-    return fallback or base.lower() or base
-
-
-def _count_participants(
-    content_lines: List[str], exclude_keywords: Sequence[str]
-) -> Dict[str, int]:
-    """Count male, female, and single female participants.
-
-    Args:
-        content_lines: List of event description lines
-        exclude_keywords: Keywords to exclude from counting
-
-    Returns:
-        Dictionary with keys: male, female, single_female, total
-    """
-    participants: Dict[str, Dict[str, int]] = {}
-
-    for line in content_lines:
-        if _should_exclude_text(line, exclude_keywords):
-            continue
-        male, female, single = _count_participant_line(line)
-
-        key = _normalise_participant_label(line)
-        stored = participants.get(key)
-        if stored is None:
-            participants[key] = {
-                "male": male,
-                "female": female,
-                "single_female": single,
-            }
-        else:
-            stored["male"] = max(stored["male"], male)
-            stored["female"] = max(stored["female"], female)
-            stored["single_female"] = max(stored["single_female"], single)
-
-    male_total = sum(values["male"] for values in participants.values())
-    female_total = sum(values["female"] for values in participants.values())
-    single_total = sum(
-        1 for values in participants.values() if values["female"] == 1 and values["male"] == 0
-    )
-
-    total = male_total + female_total
-    return {
-        "male": male_total,
-        "female": female_total,
-        "single_female": single_total,
-        "total": total,
-    }
-
-
-def _build_daily_entry(
-    cell_date: date,
-    day_of_month: int,
-    counts: Dict[str, int],
-    settings: Settings,
-) -> DailyEntry:
-    """Build a DailyEntry from parsed data.
-
-    Args:
-        cell_date: Parsed date for this entry
-        day_of_month: Day of month (1-31)
-        counts: Participant counts dictionary
-        settings: Application settings
-
-    Returns:
-        Constructed DailyEntry
-    """
-    business_dow = _business_dow_label(cell_date)
-    total = counts["total"]
-    ratio = (counts["female"] / total) if total else 0.0
-
-    # Determine if entry should be considered
-    considered = True
-    if settings.include_dow and business_dow not in settings.include_dow:
-        considered = False
-    if settings.min_total is not None and total < settings.min_total:
-        considered = False
-
-    # Evaluate criteria
-    required_single = 5 if business_dow in {"Fri", "Sat"} else 3
-    female_required = max(settings.female_min, required_single)
-    ratio_threshold = max(0.40, settings.female_ratio_min)
-    meets = (
-        considered
-        and counts["single_female"] >= required_single
-        and counts["female"] >= female_required
-        and ratio >= ratio_threshold
-        and total > 0
-    )
-
-    return DailyEntry(
-        raw_date=cell_date,
-        business_day=cell_date,
-        day_of_month=day_of_month,
-        dow_en=business_dow,
-        male=counts["male"],
-        female=counts["female"],
-        single_female=counts["single_female"],
-        total=total,
-        ratio=round(ratio, 4),
-        considered=considered,
-        meets=meets,
-        required_single=required_single,
-    )
-
-
 def parse_day_entries(
     html: str,
     *,
     settings: Optional[Settings] = None,
     reference_date: Optional[date] = None,
 ) -> List[DailyEntry]:
-    """Parse calendar HTML and extract daily entries.
-
-    Args:
-        html: HTML content to parse
-        settings: Application settings (defaults to load_settings())
-        reference_date: Reference date for date inference (defaults to today JST)
-
-    Returns:
-        List of parsed DailyEntry objects, sorted by business_day
-    """
     cfg = settings or load_settings()
-    table = _extract_calendar_table(html)
-    if not table:
-        return []
-
-    today = reference_date or datetime.now(tz=JST).date()
-    results: List[DailyEntry] = []
-
-    for cell in _iter_calendar_cells(table):
-        entry = _parse_calendar_cell(cell, today, cfg)
-        if entry is None:
-            continue
-
-        LOGGER.debug("Parsed entry: %s", entry)
-        results.append(entry)
-
-    results.sort(key=lambda e: e.business_day)
-    LOGGER.info(
-        "parsing_completed",
-        entry_count=len(results),
-        meets_criteria_count=sum(1 for e in results if e.meets)
-    )
-    return results
-
-
-def _iter_calendar_cells(table: Tag) -> Iterable[Tag]:
-    """Yield every calendar cell (<td>) from the provided table."""
-
-    for row in table.find_all("tr"):
-        cells = row.find_all("td")
-        for cell in cells:
-            if isinstance(cell, Tag):
-                yield cell
-
-
-def _parse_calendar_cell(
-    cell: Tag,
-    today: date,
-    cfg: Settings,
-) -> Optional[DailyEntry]:
-    parts = _extract_cell_parts(cell)
-    if not parts:
-        return None
-
-    explicit_date = _extract_explicit_cell_date(cell)
-    day_of_month = _extract_day_number(parts)
-    resolved_date, resolved_day = _resolve_cell_date(explicit_date, day_of_month, today)
-    if resolved_date is None or resolved_day is None:
-        return None
-
-    content_lines = _extract_content_lines(parts)
-    counts = _count_participants(content_lines, cfg.exclude_keywords)
-    return _build_daily_entry(resolved_date, resolved_day, counts, cfg)
-
-
-def _extract_cell_parts(cell: Tag) -> List[str]:
-    return [part.strip() for part in cell.stripped_strings if part.strip()]
-
-
-def _resolve_cell_date(
-    explicit_date: Optional[date],
-    day_of_month: Optional[int],
-    today: date,
-) -> Tuple[Optional[date], Optional[int]]:
-    if explicit_date is None and day_of_month is None:
-        return None, None
-
-    if explicit_date is not None:
-        resolved_day = day_of_month or explicit_date.day
-        return explicit_date, resolved_day
-
-    if day_of_month is None:
-        return None, None
-
-    inferred = infer_entry_date(day_of_month, today)
-    return inferred, day_of_month
+    return _parse_day_entries(html, settings=cfg, reference_date=reference_date)
 
 
 def log_parsing_snapshot(entries: Sequence[DailyEntry], logical_today: date) -> None:
@@ -785,67 +340,6 @@ def log_parsing_snapshot(entries: Sequence[DailyEntry], logical_today: date) -> 
             )
             break
     LOGGER.debug("[DEBUG] latest_nonzero: %s", latest_nonzero or "なし")
-
-
-def _coerce_stage(value: Any) -> str:
-    if isinstance(value, str):
-        lowered = value.lower()
-        if lowered in {"none", "initial", "bonus"}:
-            return lowered
-    return "none"
-
-
-def _coerce_last_notified(value: Any) -> Optional[int]:
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
-
-
-def evaluate_stage_transition(
-    entry: DailyEntry,
-    prev_state: Optional[Dict[str, Any]],
-    *,
-    now_ts: int,
-    cooldown_seconds: int,
-    bonus_single_delta: int,
-    bonus_ratio_threshold: float,
-) -> Tuple[Optional[str], str, Optional[int]]:
-    if not entry.meets:
-        return None, "none", None
-
-    prev_stage = _coerce_stage(prev_state.get("stage")) if prev_state else "none"
-    prev_last = _coerce_last_notified(prev_state.get("last_notified_at")) if prev_state else None
-
-    stage = prev_stage
-    last = prev_last
-    action: Optional[str] = None
-
-    bonus_by_single = entry.single_female >= entry.required_single + bonus_single_delta
-    bonus_by_ratio = entry.ratio >= bonus_ratio_threshold
-
-    if stage == "none":
-        action = "initial"
-        stage = "initial"
-        last = now_ts
-    elif stage == "initial":
-        if bonus_by_single or bonus_by_ratio:
-            action = "bonus"
-            stage = "bonus"
-            last = now_ts
-    elif stage == "bonus":
-        if last is None or now_ts - last >= cooldown_seconds:
-            stage = "initial"
-    else:
-        stage = "initial"
-        action = "initial"
-        last = now_ts
-
-    return action, stage, last
 
 
 def _format_business_label(target: date, logical_today: date) -> str:
@@ -950,17 +444,14 @@ def _build_slack_blocks(
 
 
 def notify_slack(payload: Dict[str, Any], settings: Settings) -> None:
-    webhook = settings.slack_webhook_url
-    if not webhook:
-        LOGGER.info("SLACK_WEBHOOK_URL is not configured; skipping Slack notification")
-        LOGGER.debug("Slack payload: %s", payload)
-        return
-    try:
-        response = requests.post(webhook, json=payload, timeout=10)
-        response.raise_for_status()
-        LOGGER.info("Slack notification sent. status=%s", response.status_code)
-    except Exception as exc:  # pragma: no cover - network variability
-        LOGGER.error("Slack notification failed: %s", exc)
+    fallback_text = str(payload.get("text") or "Cheekschecker notification")
+    _send_slack_message(
+        settings.slack_webhook_url,
+        payload,
+        fallback_text,
+        logger=LOGGER,
+        retry_fallback=False,
+    )
 
 
 def _bin_value(value: int, bands: Sequence[Tuple[int, Optional[int], str]]) -> str:
@@ -1058,96 +549,104 @@ def save_masked_history(data: Dict[str, Any]) -> None:
     LOGGER.debug("history_masked.json updated")
 
 
-def _state_entry_to_daily_entry(business_day: date, state_entry: Dict[str, Any]) -> Optional[DailyEntry]:
-    counts = state_entry.get("counts")
-    if not isinstance(counts, dict):
-        return None
-
-    def _coerce_int(value: Any) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 0
-
-    def _coerce_float(value: Any) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 0.0
-
-    male = max(0, _coerce_int(counts.get("male")))
-    female = max(0, _coerce_int(counts.get("female")))
-    single = max(0, _coerce_int(counts.get("single_female")))
-    total_raw = counts.get("total")
-    total = _coerce_int(total_raw) if total_raw is not None else male + female
-    if total <= 0:
-        total = male + female
-
-    ratio_raw = counts.get("ratio")
-    ratio = _coerce_float(ratio_raw)
-    if ratio <= 0 and total:
-        ratio = female / total
-    ratio = max(0.0, min(1.0, ratio))
-
-    dow_label = _business_dow_label(business_day)
-    required_single = 5 if dow_label in {"Fri", "Sat"} else 3
-
-    return DailyEntry(
-        raw_date=business_day,
-        business_day=business_day,
-        day_of_month=business_day.day,
-        dow_en=dow_label,
-        male=male,
-        female=female,
-        single_female=single,
-        total=total,
-        ratio=round(ratio, 4),
-        considered=True,
-        meets=bool(state_entry.get("met", False)),
-        required_single=required_single,
+def _robots_agent_matches(agent: str, user_agent: str) -> bool:
+    normalized_agent = agent.strip().lower()
+    normalized_user_agent = user_agent.strip().lower()
+    product_token = normalized_user_agent.split("/", 1)[0]
+    return (
+        normalized_agent == "*"
+        or normalized_agent == normalized_user_agent
+        or normalized_agent == product_token
     )
 
 
-def _supplement_entries_from_state(
-    entries: Sequence[DailyEntry],
-    state: Dict[str, Any],
+def _parse_matching_robots_rules(
+    robots_text: str,
     *,
-    logical_today: date,
-    days: int,
-) -> List[DailyEntry]:
-    """Fill gaps using cached state entries to keep long-range summaries accurate."""
+    user_agent: str,
+) -> List[Tuple[str, str]]:
+    groups: List[Tuple[Tuple[str, ...], List[Tuple[str, str]]]] = []
+    current_agents: List[str] = []
+    current_rules: List[Tuple[str, str]] = []
+    seen_rule = False
 
-    if not state or "days" not in state:
-        return list(entries)
+    def flush_group() -> None:
+        if current_agents:
+            groups.append((tuple(current_agents), list(current_rules)))
 
-    window_start = logical_today - timedelta(days=days * 2 - 1)
-    existing: Dict[date, DailyEntry] = {entry.business_day: entry for entry in entries}
-    supplemental: List[DailyEntry] = []
-
-    for key, value in state.get("days", {}).items():
-        try:
-            day = date.fromisoformat(str(key))
-        except ValueError:
+    for raw_line in robots_text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or ":" not in line:
             continue
-        if day in existing:
+        field, value = line.split(":", 1)
+        field = field.strip().lower()
+        value = value.strip()
+        if field == "user-agent":
+            if seen_rule:
+                flush_group()
+                current_agents = []
+                current_rules = []
+                seen_rule = False
+            current_agents.append(value)
             continue
-        if day < window_start or day > logical_today:
-            continue
-        reconstructed = _state_entry_to_daily_entry(day, value)
-        if reconstructed is None:
-            continue
-        existing[day] = reconstructed
-        supplemental.append(reconstructed)
+        if field in {"allow", "disallow"} and current_agents:
+            current_rules.append((field, value))
+            seen_rule = True
 
-    if supplemental:
-        LOGGER.info(
-            "Supplemented %d entries from cached state for summary coverage",
-            len(supplemental),
-        )
+    flush_group()
 
-    merged = list(existing.values())
-    merged.sort(key=lambda e: e.business_day)
-    return merged
+    matching: List[Tuple[int, List[Tuple[str, str]]]] = []
+    for agents, group_rules in groups:
+        matching_agents = [
+            agent for agent in agents if _robots_agent_matches(agent, user_agent)
+        ]
+        if not matching_agents:
+            continue
+        specificity = max(0 if agent == "*" else len(agent) for agent in matching_agents)
+        matching.append((specificity, group_rules))
+
+    if not matching:
+        return []
+
+    best_specificity = max(specificity for specificity, _ in matching)
+    selected_rules: List[Tuple[str, str]] = []
+    for specificity, group_rules in matching:
+        if specificity == best_specificity:
+            selected_rules.extend(group_rules)
+    return selected_rules
+
+
+def _robots_path_allowed(
+    robots_text: str,
+    *,
+    target_url: str,
+    user_agent: str = DEFAULT_USER_AGENT_ID,
+) -> bool:
+    parsed = urlparse(target_url)
+    target_path = parsed.path or "/"
+    rules = _parse_matching_robots_rules(robots_text, user_agent=user_agent)
+    best_match: Optional[Tuple[int, str]] = None
+
+    for directive, rule_path in rules:
+        if directive == "disallow" and not rule_path:
+            continue
+        if directive == "allow" and not rule_path:
+            continue
+        if not target_path.startswith(rule_path):
+            continue
+        candidate = (len(rule_path), directive)
+        if best_match is None:
+            best_match = candidate
+            continue
+        if candidate[0] > best_match[0]:
+            best_match = candidate
+            continue
+        if candidate[0] == best_match[0] and candidate[1] == "allow":
+            best_match = candidate
+
+    if best_match is None:
+        return True
+    return best_match[1] == "allow"
 
 
 def check_robots_allow(settings: Settings) -> bool:
@@ -1160,26 +659,11 @@ def check_robots_allow(settings: Settings) -> bool:
         if response.status_code >= 400:
             LOGGER.warning("robots.txt unavailable (%s); skipping enforcement", response.status_code)
             return True
-        disallow_paths: List[str] = []
-        current_agent: Optional[str] = None
-        for line in response.text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.lower().startswith("user-agent"):
-                _, agent = line.split(":", 1)
-                current_agent = agent.strip()
-            elif line.lower().startswith("disallow") and current_agent in {"*", DEFAULT_USER_AGENT_ID}:
-                _, path = line.split(":", 1)
-                disallow_paths.append(path.strip())
-        path = parsed.path or "/"
-        for disallow in disallow_paths:
-            if not disallow:
-                continue
-            if path.startswith(disallow):
-                LOGGER.warning("robots.txt disallows path=%s; skipping fetch", path)
-                return False
-        return True
+
+        allowed = _robots_path_allowed(response.text, target_url=settings.target_url)
+        if not allowed:
+            LOGGER.warning("robots.txt disallows target_url=%s; skipping fetch", settings.target_url)
+        return allowed
     except Exception as exc:  # pragma: no cover
         LOGGER.warning("robots enforcement failed (%s); proceeding cautiously", exc)
         return True
@@ -1589,16 +1073,6 @@ def process_notifications(
     return state
 
 
-def _summary_stats(values: Sequence[float]) -> Dict[str, float]:
-    if not values:
-        return {"avg": 0.0, "median": 0.0, "max": 0.0}
-    return {
-        "avg": round(sum(values) / len(values), 2),
-        "median": round(statistics.median(values), 2),
-        "max": round(max(values), 2),
-    }
-
-
 def select_summary_bundle(entries: Sequence[DailyEntry], *, logical_today: date, days: int) -> SummaryBundle:
     start = logical_today - timedelta(days=days - 1)
     period_days = [entry for entry in entries if start <= entry.business_day <= logical_today]
@@ -1645,82 +1119,6 @@ def _build_raw_summary_payload(
     }
 
 
-def _weekday_profile(entries: Sequence[DailyEntry]) -> str:
-    groups: Dict[str, List[DailyEntry]] = {dow: [] for dow in DOW_EN}
-    for entry in entries:
-        groups[entry.dow_en].append(entry)
-    summary_parts: List[str] = []
-    for dow in DOW_EN:
-        if not groups[dow]:
-            continue
-        avg_single = sum(e.single_female for e in groups[dow]) / len(groups[dow])
-        avg_ratio = sum(e.ratio for e in groups[dow]) / len(groups[dow])
-        summary_parts.append(
-            f"{DOW_JP[dow]}: 単女{avg_single:.1f} / 比率{avg_ratio*100:.1f}%"
-        )
-    return "、".join(summary_parts) if summary_parts else "データ不足"
-
-
-def _format_hot_day(entry: DailyEntry, logical_today: date) -> str:
-    percent = int(round(entry.ratio * 100))
-    label = _format_business_label(entry.business_day, logical_today)
-    return f"{label} 単女{entry.single_female} 女{entry.female}/全{entry.total} ({percent}%)"
-
-
-def generate_summary_payload(bundle: SummaryBundle, *, logical_today: date, settings: Settings) -> Optional[Dict[str, Any]]:
-    if not bundle.period_days:
-        LOGGER.info("No entries available for summary period=%s", bundle.period_label)
-        return None
-
-    singles = [entry.single_female for entry in bundle.period_days]
-    females = [entry.female for entry in bundle.period_days]
-    ratios = [entry.ratio * 100 for entry in bundle.period_days]
-
-    single_stats = _summary_stats([float(x) for x in singles])
-    female_stats = _summary_stats([float(x) for x in females])
-    ratio_stats = _summary_stats([float(x) for x in ratios])
-
-    prev_single_avg = sum(entry.single_female for entry in bundle.previous_days) / len(bundle.previous_days) if bundle.previous_days else 0.0
-    prev_ratio_avg = (sum(entry.ratio for entry in bundle.previous_days) / len(bundle.previous_days)) * 100 if bundle.previous_days else 0.0
-    delta_single = single_stats["avg"] - prev_single_avg if bundle.previous_days else 0.0
-    delta_ratio = ratio_stats["avg"] - prev_ratio_avg if bundle.previous_days else 0.0
-
-    top_days = sorted(
-        bundle.period_days,
-        key=lambda e: (e.ratio, e.single_female, e.female, -abs((logical_today - e.business_day).days)),
-        reverse=True,
-    )[:3]
-
-    weekday_profile = _weekday_profile(bundle.period_days)
-
-    lines = [
-        f"*{bundle.period_label}サマリー*",
-        f"平均 単女{single_stats['avg']:.2f} / 女{female_stats['avg']:.2f} / 比率{ratio_stats['avg']:.2f}%",
-        f"中央値 単女{single_stats['median']:.2f} / 女{female_stats['median']:.2f} / 比率{ratio_stats['median']:.2f}%",
-        f"最大 単女{single_stats['max']:.2f} / 女{female_stats['max']:.2f} / 比率{ratio_stats['max']:.2f}%",
-        f"傾向: 単女平均 {delta_single:+.2f} / 比率平均 {delta_ratio:+.2f}pp",
-        "Hot 日 Top3:",
-    ]
-    lines.extend(f"• {_format_hot_day(entry, logical_today)}" for entry in top_days)
-    lines.append(f"曜日プロファイル: {weekday_profile}")
-    lines.append(f"解析対象日数: {len(bundle.period_days)} 日")
-
-    text = "\n".join(lines)
-    blocks = [
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": ("<!channel> " if settings.ping_channel else "") + lines[0]},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "\n".join(lines[1:])},
-        },
-    ]
-    if settings.ping_channel:
-        text = "<!channel> " + text
-    return {"text": text, "blocks": blocks}
-
-
 def update_masked_history(entries: Sequence[DailyEntry], *, settings: Settings) -> None:
     history = load_masked_history()
     history.setdefault("days", {})
@@ -1736,7 +1134,83 @@ def update_masked_history(entries: Sequence[DailyEntry], *, settings: Settings) 
     save_masked_history(history)
 
 
-def should_skip_by_http_headers(settings: Settings, prev_state: Dict[str, Any]) -> Tuple[bool, Dict[str, Optional[str]]]:
+def _parse_state_datetime(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=JST)
+    return parsed.astimezone(JST)
+
+
+def _warning_throttle_entry(state: Dict[str, Any], key: str) -> Dict[str, Any]:
+    throttle = public_state.sanitize_warning_throttle(state.get("warning_throttle"))
+    state["warning_throttle"] = throttle
+    return throttle[key]
+
+
+def _reset_warning_throttle(state: Dict[str, Any], key: str) -> None:
+    throttle = public_state.sanitize_warning_throttle(state.get("warning_throttle"))
+    throttle[key] = public_state.default_warning_throttle_state()[key]
+    state["warning_throttle"] = throttle
+
+
+def _record_warning_event(
+    state: Dict[str, Any],
+    *,
+    key: str,
+    category: str,
+    now: datetime,
+    throttle_minutes: int,
+) -> Tuple[bool, int]:
+    entry = _warning_throttle_entry(state, key)
+    suppressed_before = int(entry.get("suppressed_runs") or 0)
+    consecutive_runs = int(entry.get("consecutive_runs") or 0) + 1
+    last_warned_at = _parse_state_datetime(entry.get("last_warned_at"))
+    should_warn = (
+        throttle_minutes <= 0
+        or last_warned_at is None
+        or now.astimezone(JST) - last_warned_at >= timedelta(minutes=throttle_minutes)
+    )
+
+    entry["last_seen_at"] = now.astimezone(JST).isoformat()
+    entry["consecutive_runs"] = consecutive_runs
+    entry["last_category"] = category
+    if should_warn:
+        entry["last_warned_at"] = now.astimezone(JST).isoformat()
+        entry["suppressed_runs"] = 0
+        return True, suppressed_before
+
+    entry["suppressed_runs"] = suppressed_before + 1
+    return False, entry["suppressed_runs"]
+
+
+def _can_skip_for_cached_headers(
+    prev_state: Dict[str, Any],
+    *,
+    now: datetime,
+    max_age_minutes: int,
+) -> bool:
+    if max_age_minutes <= 0:
+        return False
+    last_fetched_at = _parse_state_datetime(prev_state.get("last_fetched_at"))
+    if last_fetched_at is None:
+        return False
+    age = now.astimezone(JST) - last_fetched_at
+    if age < timedelta(0):
+        return False
+    return age <= timedelta(minutes=max_age_minutes)
+
+
+def should_skip_by_http_headers(
+    settings: Settings,
+    prev_state: Dict[str, Any],
+    *,
+    now: Optional[datetime] = None,
+) -> Tuple[bool, Dict[str, Optional[str]]]:
     try:
         response = requests.head(settings.target_url, timeout=10)
         response.raise_for_status()
@@ -1747,8 +1221,17 @@ def should_skip_by_http_headers(settings: Settings, prev_state: Dict[str, Any]) 
             same = True
         if last_modified and prev_state.get("last_modified") and last_modified == prev_state.get("last_modified"):
             same = True
-        LOGGER.info("HEAD check completed. skip=%s", same)
-        return same, {"etag": etag, "last_modified": last_modified}
+        can_skip = same and _can_skip_for_cached_headers(
+            prev_state,
+            now=now or datetime.now(tz=JST),
+            max_age_minutes=settings.head_skip_max_age_minutes,
+        )
+        if same and not can_skip:
+            LOGGER.info(
+                "HEAD matched cached validators but fetch is forced because last successful fetch is stale or unknown"
+            )
+        LOGGER.info("HEAD check completed. skip=%s", can_skip)
+        return can_skip, {"etag": etag, "last_modified": last_modified}
     except Exception as exc:  # pragma: no cover
         LOGGER.warning("HEAD check failed: %s", exc)
         return False, {"etag": None, "last_modified": None}
@@ -1793,9 +1276,37 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
             target_url=settings.target_url,
         )
         LOGGER.warning("%s detail=%s", message, detail)
-        append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, fallback)
-        notify_slack(payload, settings)
+        should_warn, suppressed_runs = _record_warning_event(
+            state,
+            key=MONITOR_FETCH_FAILURE_WARNING_KEY,
+            category=FETCH_UNAVAILABLE_WARNING_CATEGORY,
+            now=now,
+            throttle_minutes=settings.warning_throttle_minutes,
+        )
+        save_state(state)
+        if should_warn:
+            if suppressed_runs:
+                sections.append(("警告抑制", [f"前回通知後に {suppressed_runs} 回の Slack 警告を抑制"]))
+            append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, fallback)
+            notify_slack(payload, settings)
+        else:
+            sections.append(
+                (
+                    "警告抑制",
+                    [
+                        f"Slack warning suppressed by WARNING_THROTTLE_MINUTES={settings.warning_throttle_minutes}",
+                        f"suppressed_runs={suppressed_runs}",
+                    ],
+                )
+            )
+            append_step_summary(
+                STEP_SUMMARY_TITLE_MONITOR,
+                sections,
+                f"{fallback} (Slack warning suppressed)",
+            )
         return
+    state["last_fetched_at"] = datetime.now(tz=JST).isoformat()
+    _reset_warning_throttle(state, MONITOR_FETCH_FAILURE_WARNING_KEY)
     if output_sanitized:
         output_sanitized.parent.mkdir(parents=True, exist_ok=True)
         output_sanitized.write_text(sanitize_html(html), encoding="utf-8")

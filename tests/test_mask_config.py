@@ -1,4 +1,5 @@
 import json
+import logging
 import sys
 from datetime import date
 from pathlib import Path
@@ -81,3 +82,24 @@ def test_mask_entry_ratio_thresholds_expand(tmp_path):
         for value in ratios
     ]
     assert labels == ["A", "B", "C", "D"]
+
+
+def test_load_masking_config_warns_for_dangerous_custom_bands(tmp_path, caplog):
+    config_data = {
+        "count_bands": [[5, 1, "bad"], [1, 3, ""], [2, None, "overlap"]],
+        "ratio_bands": [[-0.1, 1.2, "wide"]],
+        "level2_ratio_thresholds": [-0.1, 0.5, 1.5],
+    }
+    config_path = tmp_path / "masking.json"
+    config_path.write_text(json.dumps(config_data, ensure_ascii=False), encoding="utf-8")
+
+    caplog.set_level(logging.WARNING)
+
+    load_masking_config(str(config_path))
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "count_bands has high < low" in messages
+    assert "count_bands has empty label" in messages
+    assert "count_bands has overlapping or unsorted bands" in messages
+    assert "ratio_bands has ratio bound outside 0..1" in messages
+    assert "level2_ratio_thresholds has value outside 0..1" in messages

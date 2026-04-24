@@ -38,6 +38,7 @@ BASE_SETTINGS = Settings(
     robots_enforce=False,
     ua_contact=None,
     allow_fetch_failure=False,
+    head_skip_max_age_minutes=180,
 )
 
 
@@ -120,6 +121,86 @@ def test_parse_day_entries_deduplicates_repeated_commenters():
     assert entries[0].single_female == 0
 
 
+def test_parse_day_entries_keeps_digits_in_participant_identity():
+    html = """
+    <html><body><table border=\"2\"><tr><td>
+      <center>1</center>
+      <center>Mon</center>
+      <font>♀A1</font><br/>
+      <font>♀A2</font><br/>
+    </td></tr></table></body></html>
+    """
+
+    entries = parse_day_entries(html, settings=BASE_SETTINGS, reference_date=date(2024, 1, 1))
+
+    assert len(entries) == 1
+    assert entries[0].female == 2
+    assert entries[0].male == 0
+    assert entries[0].single_female == 2
+
+
+def test_parse_day_entries_aggregates_multiple_groups_in_one_cell():
+    html = """
+    <html><body><table border=\"2\"><tr><td>
+      <center>6</center>
+      <center>Sat</center>
+      <ul>
+        <li>♀A</li>
+        <li>♀♀B×2</li>
+        <li>♂C</li>
+        <li>♂♀D</li>
+      </ul>
+    </td></tr></table></body></html>
+    """
+
+    entries = parse_day_entries(html, settings=BASE_SETTINGS, reference_date=date(2024, 1, 6))
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.female == 4
+    assert entry.male == 2
+    assert entry.total == 6
+    assert entry.single_female == 1
+
+
+def test_parse_day_entries_explicit_nested_date_beats_inference():
+    html = """
+    <html><body><table border=\"2\"><tr><td>
+      <div data-day-iso=\"2026/01/02T00:00:00+09:00\">
+        <span>2</span>
+        <span>Mon</span>
+        <span>♀A</span>
+      </div>
+    </td></tr></table></body></html>
+    """
+
+    entries = parse_day_entries(html, settings=BASE_SETTINGS, reference_date=date(2025, 12, 20))
+
+    assert len(entries) == 1
+    assert entries[0].business_day == date(2026, 1, 2)
+    assert entries[0].day_of_month == 2
+    assert entries[0].dow_en == "Fri"
+
+
+def test_parse_day_entries_ignores_weekday_labels_as_participants():
+    html = """
+    <html><body><table border=\"2\"><tr><td>
+      <center>1</center>
+      <center>月</center>
+      <center>Mon</center>
+      <font>♀A</font>
+    </td></tr></table></body></html>
+    """
+
+    entries = parse_day_entries(html, settings=BASE_SETTINGS, reference_date=date(2024, 1, 1))
+
+    assert len(entries) == 1
+    assert entries[0].business_day == date(2024, 1, 1)
+    assert entries[0].female == 1
+    assert entries[0].single_female == 1
+    assert entries[0].male == 0
+
+
 @pytest.mark.parametrize(
     "reference_day, cell_day, expected",
     [
@@ -131,6 +212,10 @@ def test_parse_day_entries_deduplicates_repeated_commenters():
         # Additional edge cases
         (date(2025, 10, 27), 28, date(2025, 10, 28)),  # Same month, close date
         (date(2025, 1, 5), 30, date(2024, 12, 30)),     # Early in month, high day -> previous month
+        (date(2025, 10, 18), 3, date(2025, 10, 3)),
+        (date(2025, 10, 19), 3, date(2025, 11, 3)),
+        (date(2025, 4, 10), 30, date(2025, 4, 30)),
+        (date(2025, 4, 9), 30, date(2025, 3, 30)),
     ],
 )
 def test_infer_entry_date(reference_day, cell_day, expected):

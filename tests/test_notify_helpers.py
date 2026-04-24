@@ -83,6 +83,7 @@ def test_process_single_entry_creates_state():
         robots_enforce=False,
         ua_contact=None,
         allow_fetch_failure=False,
+        head_skip_max_age_minutes=180,
     )
 
     action, stage, last_notified, state_entry = _process_single_entry(
@@ -120,6 +121,7 @@ def test_categorize_notifications_adds_to_newly_met():
         robots_enforce=False,
         ua_contact=None,
         allow_fetch_failure=False,
+        head_skip_max_age_minutes=180,
     )
 
     stage_notifications = []
@@ -158,6 +160,7 @@ def test_categorize_notifications_adds_to_changed_when_counts_differ():
         robots_enforce=False,
         ua_contact=None,
         allow_fetch_failure=False,
+        head_skip_max_age_minutes=180,
     )
 
     stage_notifications = []
@@ -196,6 +199,7 @@ def test_categorize_notifications_handles_stage_action():
         robots_enforce=False,
         ua_contact=None,
         allow_fetch_failure=False,
+        head_skip_max_age_minutes=180,
     )
 
     stage_notifications = []

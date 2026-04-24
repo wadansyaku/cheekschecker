@@ -2,17 +2,17 @@
 
 Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業日を Slack に通知する運用基盤です。Playwright でカレンダーを取得し、BeautifulSoup で表を解析し、Slack Incoming Webhook へ Block Kit 形式で情報を投稿します。公開リポジトリ運用を前提に、永続化するのは公開安全な状態と帯域化済みデータのみです。
 
-現行の運用前提は [CURRENT_ARCHITECTURE.md](/Users/Yodai/CheeksChecker/CURRENT_ARCHITECTURE.md) を基準にしてください。`SYSTEM_IMPROVEMENT_ANALYSIS.md` と `PARALLEL_TASK_PLAN.md` は履歴資料です。
+現行の運用前提は [CURRENT_ARCHITECTURE.md](/Users/Yodai/CheeksChecker/CURRENT_ARCHITECTURE.md) を基準にしてください。大規模実装の現行計画は [IMPLEMENTATION_PLAN.md](/Users/Yodai/CheeksChecker/IMPLEMENTATION_PLAN.md) を参照します。`SYSTEM_IMPROVEMENT_ANALYSIS.md` と `PARALLEL_TASK_PLAN.md` は履歴資料です。
 
 ## 監視と通常通知（monitor）
 - JST の営業日ロールオーバーを実装し、曜日ごとの締め時刻までに追加されたセルも「論理営業日」へ正しく再割り当てします。
 - 通知対象は「論理営業日で今日以降」のセルのみです。過去セルは記録されますが Slack 通知は抑止されます（営業日ロールオーバー前提）。
 - scheduled `monitor` の正式モードは `NOTIFY_MODE=newly` です。公開 workflow では `changed` 通知の継続保証は行いません。
 - `monitor` ワークフローでは Playwright を用いた取得、`monitor_state.json` の更新、`history_masked.json` の更新、Block Kit での投稿を行います。robots.txt が `Disallow` の場合は WARN ログを出して解析をスキップし、Slack には投稿しません。
-- scheduled workflow では upstream の一時的な接続失敗を warning skip として扱います。外部サイト timeout だけでは job failure にせず、step summary / Slack warning で観測します。
-- 取得前に HEAD リクエストで ETag / Last-Modified を確認し、未更新であればフェッチをスキップします。結果は GitHub Step Summary にも反映され、Slack と整合します。
+- scheduled workflow では upstream の一時的な接続失敗を warning skip として扱います。外部サイト timeout だけでは job failure にせず、step summary / Slack warning で観測します。Slack warning は `WARNING_THROTTLE_MINUTES` で抑制し、公開状態には時刻・回数・粗いカテゴリだけを保存します。
+- 取得前に HEAD リクエストで ETag / Last-Modified を確認し、未更新であればフェッチをスキップします。ただし `last_fetched_at` が古い、または未記録の場合は強制的に再取得します。結果は GitHub Step Summary にも反映され、Slack と整合します。
 - Slack へ送った内容（または「該当なし」）は常に `GITHUB_STEP_SUMMARY` に同じ構成で追記されます。過去履歴を GitHub 上で確認しやすくしています。
-- 公開リポジトリに残す monitor 状態は `monitor_state.json` に限定し、`days[date]` には `met`、`stage`、`last_notified_at` だけを保存します。raw counts や exact ratio は保存しません。
+- 公開リポジトリに残す monitor 状態は `monitor_state.json` に限定し、`days[date]` には `met`、`stage`、`last_notified_at` だけを保存します。`last_fetched_at` は HEAD skip の鮮度判定用、`warning_throttle` は warning 抑制用の公開安全な operational metadata です。raw counts、exact ratio、例外メッセージは保存しません。
 
 ## 週次／月次サマリー（summary）
 - `.github/workflows/summary_weekly.yml`（毎週月曜）と `.github/workflows/summary_monthly.yml`（毎月 1 日）が `watch_cheeks.py summary` で最新データを取得し、`summarize.py` で集計します。生データ収集時は `--no-notify` フラグで Slack 送信を抑止し、集計済みの通知は `summarize.py` 側だけから行います。
@@ -21,7 +21,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - サマリーで生成した情報は GitHub Step Summary にも同じブロック構成で記録され、レポートの監査・再確認が容易です。
 - `summary_masked.json` は `weekly` / `monthly` キーを維持しつつ、`mode: "public-safe"` と `coverage` metadata を含みます。
 - リポジトリにコミットされるのは `monitor_state.json`、`summary_masked.json`、`history_masked.json` で、いずれも公開安全な情報だけを保持します（個人名・生値・raw counts は保存しません）。
-- `--raw-output` を指定したり `--no-notify` を付けて実行すると Slack 投稿は行わず、生データ収集だけを行えます。
+- `--raw-output` を指定したり `--no-notify` を付けて実行すると Slack 投稿は行わず、生データ収集だけを行えます。summary raw dataset は exact 値を含むため、GitHub Actions では manual dispatch の短期診断 artifact としてのみアップロードします。
 - summary ワークフローは monitor と同じ writer transaction で動き、push failure は失敗として扱います。
 
 ## GitHub Actions の構成
@@ -29,6 +29,15 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - `.github/workflows/summary_weekly.yml`：週次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。手動実行時は「Cheekschecker: Webhook OK」で疎通確認後に本投稿を行います。
 - `.github/workflows/summary_monthly.yml`：月次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。週次と同じ writer transaction で commit / push します。
 - すべてのワークフローで `TZ=Asia/Tokyo`、`ROBOTS_ENFORCE=1` を設定し、robots.txt を尊重します。
+
+### Manual dispatch 診断 artifact
+| workflow | artifact | source | retention | 公開安全性 |
+| --- | --- | --- | --- | --- |
+| `monitor.yml` | `sanitized-table` | `fetched_table_sanitized.html` | 3 days | サニタイズ済み HTML。元 HTML 派生のため短期診断限定 |
+| `monitor.yml` | `masked-history` | `history_masked.json` | 3 days | public-safe snapshot |
+| `monitor.yml` | `monitor-state` | `monitor_state.json` | 3 days | public-safe operational state |
+| `summary_weekly.yml` | `weekly-summary-raw` | `weekly_summary_raw.json` | 3 days | exact 値を含むため manual dispatch 限定 |
+| `summary_monthly.yml` | `monthly-summary-raw` | `monthly_summary_raw.json` | 3 days | exact 値を含むため manual dispatch 限定 |
 
 ## GitHub Actions の安定化
 - monitor / weekly / monthly の writer workflow は同じ `concurrency` group を使い、公開状態の同時更新を防ぎます。
@@ -50,6 +59,8 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 | `ROBOTS_ENFORCE` | robots.txt 準拠 | `1` で Disallow を尊重し、取得をスキップ（Slack 通知は無し） |
 | `ALLOW_FETCH_FAILURE` | 外部取得失敗の graceful degrade | scheduled workflow では `1`。upstream timeout を warning skip に落とし、manual dispatch では `0` のまま fail させます |
 | `UA_CONTACT` | User-Agent 連絡先 | 監視主体の連絡先メールなど |
+| `HEAD_SKIP_MAX_AGE_MINUTES` | HEAD 未更新時の最大 skip 鮮度 | 既定は 180。`0` で HEAD skip を無効化し、毎回取得します |
+| `WARNING_THROTTLE_MINUTES` | scheduled monitor の Slack warning 抑制 | 既定は 180。`0` で抑制を無効化します |
 
 ## セットアップ
 1. Python 3.11 以上と Playwright を準備します。
@@ -89,6 +100,7 @@ scripts/check_local.sh
 - **Slack に投稿されない**：`SLACK_WEBHOOK_URL` が未設定か、Block Kit 投稿で失敗した可能性があります。ログの WARN/ERROR を確認し、必要なら手動で `python summarize.py --ping-only` を実行してください。
 - **push 失敗**：writer workflow は push failure を失敗として扱います。権限不足の場合は writer job に `contents: write` が付いているか確認してください。
 - **scheduled monitor / summary が timeout した**：`cheeks.nagoya` 側の一時障害なら warning skip になります。Slack warning と step summary を確認し、manual dispatch で再取得したい場合は `ALLOW_FETCH_FAILURE=0` のまま再実行してください。
+- **scheduled monitor の warning が何度も出る**：`WARNING_THROTTLE_MINUTES` 内の連続 fetch failure は Slack 投稿を抑制し、`monitor_state.json.warning_throttle.monitor_fetch_failure` に公開安全な回数だけを残します。
 - **Playwright の依存不足**：`python -m playwright install --with-deps chromium` を再実行してください。CI では毎回実行しています。
 - **空データ期間**：`summarize.py` が「No data for this period / 集計対象なし」を Slack へ投稿し、ジョブは成功扱いになります。
 - **robots.txt で拒否された**：WARN ログが出て処理がスキップされます。対象 URL を見直すか、運用責任者に確認してください。

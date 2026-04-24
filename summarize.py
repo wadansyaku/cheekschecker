@@ -6,11 +6,14 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-
-import requests
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from src.logging_config import configure_logging, get_logger
+from src.notifications import (
+    append_step_summary as _append_step_summary,
+    build_simple_slack_payload,
+    send_slack_message as _send_slack_message,
+)
 from src.public_state import load_masked_history, load_summary_store, save_summary_store
 from src.public_summary import (
     DailyRecord,
@@ -34,58 +37,22 @@ STEP_SUMMARY_TITLES = {
 
 
 def append_step_summary(title: str, sections: Sequence[Tuple[str, Sequence[str]]], fallback: str) -> None:
-    path = os.getenv("GITHUB_STEP_SUMMARY")
-    if not path:
-        return
-    try:
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(f"## {title}\n\n")
-            if sections:
-                for heading, lines in sections:
-                    handle.write(f"### {heading}\n\n")
-                    if lines:
-                        for line in lines:
-                            handle.write(f"- {line}\n")
-                    else:
-                        handle.write("- 該当なし\n")
-                    handle.write("\n")
-            else:
-                handle.write(f"{fallback or 'No data'}\n\n")
-    except OSError as exc:  # pragma: no cover - filesystem nuances
-        LOGGER.debug("Failed to append step summary: %s", exc)
+    _append_step_summary(
+        title,
+        sections,
+        fallback,
+        empty_fallback="該当なし",
+        logger=LOGGER,
+    )
 
 
 def send_slack_message(webhook: str, payload: Dict[str, Any], fallback_text: str) -> None:
-    if not webhook:
-        LOGGER.warning("SLACK_WEBHOOK_URL is not set; skipping Slack notification")
-        LOGGER.info("Fallback summary (no webhook): %s", fallback_text)
-        return
-    try:
-        response = requests.post(webhook, json=payload, timeout=10)
-        response.raise_for_status()
-        LOGGER.info("Slack notification sent via block kit")
-        return
-    except Exception as exc:
-        LOGGER.error("Slack block send failed: %s", exc)
-    try:
-        response = requests.post(webhook, json={"text": fallback_text}, timeout=10)
-        response.raise_for_status()
-        LOGGER.info("Slack fallback text sent")
-    except Exception as exc:
-        LOGGER.error("Slack fallback also failed: %s", exc)
+    _send_slack_message(webhook, payload, fallback_text, logger=LOGGER)
 
 
 def send_simple_message(webhook: str, message: str, title: str) -> None:
-    payload = {
-        "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*{title}*\n{message}"},
-            }
-        ],
-        "text": f"{title} {message}",
-    }
-    send_slack_message(webhook, payload, f"{title} {message}")
+    payload, fallback = build_simple_slack_payload(message, title)
+    send_slack_message(webhook, payload, fallback)
 
 
 def handle_no_data(period_title: str, webhook: str, summary_title: str) -> None:
