@@ -28,7 +28,7 @@ def _summary_weekly_workflow_lines(
         "        run: python watch_cheeks.py summary --days 7 --raw-output weekly_summary_raw.json --no-notify",
         "      - name: Upload raw weekly summary",
         f"        if: {artifact_if}",
-        "        uses: actions/upload-artifact@v4",
+        "        uses: actions/upload-artifact@v7",
         "        with:",
         "          name: weekly-summary-raw",
         "          path: weekly_summary_raw.json",
@@ -68,21 +68,21 @@ def _monitor_workflow_lines(*, retention: str = "3") -> list[str]:
         "        run: python watch_cheeks.py monitor --sanitized-output fetched_table_sanitized.html",
         "      - name: Upload sanitized table",
         "        if: github.event_name == 'workflow_dispatch'",
-        "        uses: actions/upload-artifact@v4",
+        "        uses: actions/upload-artifact@v7",
         "        with:",
         "          name: sanitized-table",
         "          path: fetched_table_sanitized.html",
         f"          retention-days: {retention}",
         "      - name: Upload masked history snapshot",
         "        if: github.event_name == 'workflow_dispatch'",
-        "        uses: actions/upload-artifact@v4",
+        "        uses: actions/upload-artifact@v7",
         "        with:",
         "          name: masked-history",
         "          path: history_masked.json",
         "          retention-days: 3",
         "      - name: Upload monitor state snapshot",
         "        if: github.event_name == 'workflow_dispatch'",
-        "        uses: actions/upload-artifact@v4",
+        "        uses: actions/upload-artifact@v7",
         "        with:",
         "          name: monitor-state",
         "          path: monitor_state.json",
@@ -158,9 +158,24 @@ def test_workflows_using_javascript_actions_require_node24_opt_in() -> None:
         "jobs:",
         "  test:",
         "    steps:",
-        "      - uses: actions/checkout@v4",
+        "      - uses: actions/checkout@v6",
     ]
 
     errors = validate_public_safe_workflow_contract(Path(".github/workflows/test.yml"), lines)
 
     assert any("Node 24" in error for error in errors)
+
+
+def test_legacy_node20_action_refs_are_rejected() -> None:
+    lines = [
+        "env:",
+        "  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'",
+        "jobs:",
+        "  test:",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+    ]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/test.yml"), lines)
+
+    assert any("legacy Node 20 action actions/checkout@v4" in error for error in errors)

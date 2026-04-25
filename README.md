@@ -44,7 +44,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 ## GitHub Actions の安定化
 - monitor / weekly / monthly の writer workflow は同じ `concurrency` group を使い、公開状態の同時更新を防ぎます。
 - monitor / weekly / monthly すべてに `timeout-minutes`（10 / 15 / 20 分）を設定し、ハングアップを抑止しています。
-- `actions/cache@v4` で pip / Playwright のキャッシュを共有し、安定かつ高速なデプロイを実現しています。
+- `actions/cache@v5` で pip / Playwright のキャッシュを共有し、安定かつ高速なデプロイを実現しています。
 - 生成物（サニタイズ済み HTML や期間生データ JSON）は Artifact として最長 3 日間だけ保持し、生データの露出を最小化しています。
 - writer job だけに `contents: write` を付与し、failure 通知 job には write 権限を持たせません。
 

@@ -31,6 +31,13 @@ WRITER_COMMIT_TARGETS = {
 }
 
 NODE24_OPT_IN = "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'"
+LEGACY_NODE20_ACTION_REFS = (
+    "actions/checkout@v4",
+    "actions/setup-python@v5",
+    "actions/cache@v4",
+    "actions/upload-artifact@v4",
+    "nick-fields/retry@v3",
+)
 
 
 def contains_bidi_controls(text: str) -> list[tuple[int, int]]:
@@ -115,6 +122,17 @@ def _uses_javascript_action(lines: list[str]) -> bool:
         if action_ref.startswith(javascript_action_prefixes):
             return True
     return False
+
+
+def _action_refs(lines: list[str]) -> list[str]:
+    refs: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("- uses:"):
+            refs.append(stripped.split("- uses:", 1)[1].strip())
+        elif stripped.startswith("uses:"):
+            refs.append(stripped.split("uses:", 1)[1].strip())
+    return refs
 
 
 def _workflow_step_blocks(lines: list[str]) -> list[tuple[int, list[str]]]:
@@ -242,6 +260,10 @@ def validate_public_safe_workflow_contract(path: Path, lines: list[str]) -> list
 
     if _uses_javascript_action(lines) and not _contains_line(lines, NODE24_OPT_IN):
         errors.append(f"{path} must opt JavaScript actions into Node 24 with {NODE24_OPT_IN}")
+
+    for action_ref in _action_refs(lines):
+        if action_ref in LEGACY_NODE20_ACTION_REFS:
+            errors.append(f"{path} must not use legacy Node 20 action {action_ref}")
 
     if "git push || true" in text or "git push origin" in text and "|| true" in text:
         errors.append(f"{path} must not ignore git push failures")
