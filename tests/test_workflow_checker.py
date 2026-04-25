@@ -10,6 +10,7 @@ def _summary_weekly_workflow_lines(
 ) -> list[str]:
     return [
         "env:",
+        "  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'",
         "  TZ: Asia/Tokyo",
         "  ROBOTS_ENFORCE: '1'",
         "concurrency:",
@@ -44,6 +45,7 @@ def _summary_weekly_workflow_lines(
 def _monitor_workflow_lines(*, retention: str = "3") -> list[str]:
     return [
         "env:",
+        "  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'",
         "  TZ: Asia/Tokyo",
         "  ROBOTS_ENFORCE: '1'",
         "  WARNING_THROTTLE_MINUTES: '180'",
@@ -148,3 +150,17 @@ def test_monitor_requires_manual_slack_diagnostic_step() -> None:
     errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
 
     assert any("Slack diagnostic step" in error for error in errors)
+
+
+def test_workflows_using_javascript_actions_require_node24_opt_in() -> None:
+    lines = [
+        "name: Tests",
+        "jobs:",
+        "  test:",
+        "    steps:",
+        "      - uses: actions/checkout@v4",
+    ]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/test.yml"), lines)
+
+    assert any("Node 24" in error for error in errors)

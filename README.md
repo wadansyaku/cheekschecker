@@ -30,6 +30,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - `.github/workflows/summary_weekly.yml`：週次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。手動実行時は「Cheekschecker: Webhook OK」で疎通確認後に本投稿を行います。
 - `.github/workflows/summary_monthly.yml`：月次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。週次と同じ writer transaction で commit / push します。
 - すべてのワークフローで `TZ=Asia/Tokyo`、`ROBOTS_ENFORCE=1` を設定し、robots.txt を尊重します。
+- JavaScript action は `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` で Node.js 24 実行へ opt-in し、GitHub Actions runner の Node.js 20 removal に先行対応します。
 
 ### Manual dispatch 診断 artifact
 | workflow | artifact | source | retention | 公開安全性 |

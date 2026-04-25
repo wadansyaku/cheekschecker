@@ -30,6 +30,8 @@ WRITER_COMMIT_TARGETS = {
     "summary_monthly.yml": "git add monitor_state.json history_masked.json summary_masked.json",
 }
 
+NODE24_OPT_IN = "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'"
+
 
 def contains_bidi_controls(text: str) -> list[tuple[int, int]]:
     hits: list[tuple[int, int]] = []
@@ -95,6 +97,24 @@ def validate_retry_timeout(path: Path, lines: list[str]) -> list[str]:
 
 def _contains_line(lines: list[str], needle: str) -> bool:
     return any(needle in line for line in lines)
+
+
+def _uses_javascript_action(lines: list[str]) -> bool:
+    javascript_action_prefixes = (
+        "actions/",
+        "nick-fields/retry@",
+    )
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("- uses:"):
+            action_ref = stripped.split("- uses:", 1)[1].strip()
+        elif stripped.startswith("uses:"):
+            action_ref = stripped.split("uses:", 1)[1].strip()
+        else:
+            continue
+        if action_ref.startswith(javascript_action_prefixes):
+            return True
+    return False
 
 
 def _workflow_step_blocks(lines: list[str]) -> list[tuple[int, list[str]]]:
@@ -219,6 +239,9 @@ def validate_public_safe_workflow_contract(path: Path, lines: list[str]) -> list
     path_name = path.name
     is_writer = path_name in {"monitor.yml", "summary_weekly.yml", "summary_monthly.yml"}
     blocks = _workflow_step_blocks(lines)
+
+    if _uses_javascript_action(lines) and not _contains_line(lines, NODE24_OPT_IN):
+        errors.append(f"{path} must opt JavaScript actions into Node 24 with {NODE24_OPT_IN}")
 
     if "git push || true" in text or "git push origin" in text and "|| true" in text:
         errors.append(f"{path} must not ignore git push failures")

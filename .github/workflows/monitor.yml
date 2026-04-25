@@ -19,6 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   TZ: Asia/Tokyo
   NOTIFY_MODE: 'newly'
   NOTIFY_FROM_TODAY: '1'
