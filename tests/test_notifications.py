@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src import notifications
 
 
@@ -117,3 +119,14 @@ def test_send_slack_message_skips_fallback_when_disabled(monkeypatch) -> None:
     )
 
     assert len(calls) == 1
+
+
+def test_send_slack_message_strict_mode_fails_without_webhook() -> None:
+    with pytest.raises(RuntimeError, match="SLACK_WEBHOOK_URL"):
+        notifications.send_slack_message(
+            None,
+            {"text": "block", "blocks": []},
+            "fallback text",
+            logger=_Logger(),
+            raise_on_failure=True,
+        )

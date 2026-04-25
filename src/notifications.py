@@ -56,22 +56,29 @@ def send_slack_message(
     logger: Optional[Any] = None,
     retry_fallback: bool = True,
     timeout: int = 10,
+    raise_on_failure: bool = False,
 ) -> None:
     log = _logger_or_default(logger)
     if not webhook:
         log.warning("SLACK_WEBHOOK_URL is not set; skipping Slack notification")
         log.info("Fallback summary (no webhook): %s", fallback_text)
+        if raise_on_failure:
+            raise RuntimeError("SLACK_WEBHOOK_URL is not set")
         return
 
+    block_error: Exception | None = None
     try:
         response = requests.post(webhook, json=payload, timeout=timeout)
         response.raise_for_status()
         log.info("Slack notification sent via block kit")
         return
     except Exception as exc:  # pragma: no cover - network variability
+        block_error = exc
         log.error("Slack block send failed: %s", exc)
 
     if not retry_fallback:
+        if raise_on_failure:
+            raise RuntimeError("Slack block notification failed") from block_error
         return
 
     try:
@@ -80,6 +87,8 @@ def send_slack_message(
         log.info("Slack fallback text sent")
     except Exception as exc:  # pragma: no cover - network variability
         log.error("Slack fallback also failed: %s", exc)
+        if raise_on_failure:
+            raise RuntimeError("Slack block and fallback notifications failed") from exc
 
 
 def build_simple_slack_payload(message: str, title: str) -> Tuple[Dict[str, Any], str]:

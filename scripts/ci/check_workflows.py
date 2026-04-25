@@ -191,6 +191,28 @@ def _validate_allow_fetch_failure_contract(
     return errors
 
 
+def _validate_monitor_slack_diagnostic_contract(
+    path: Path,
+    blocks: list[tuple[int, list[str]]],
+) -> list[str]:
+    if path.name != "monitor.yml":
+        return []
+
+    errors: list[str] = []
+    diagnostic = _find_step_block(blocks, "Send monitor Slack diagnostic")
+    if diagnostic is None:
+        return [f"{path} manual monitor must include a Slack diagnostic step"]
+
+    start, block = diagnostic
+    if not _step_has_line(block, "if: github.event_name == 'workflow_dispatch' && inputs.send_monitor_diagnostic"):
+        errors.append(f"{path}:{start} monitor Slack diagnostic must be manual-input gated")
+    if not _step_has_line(block, "SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}"):
+        errors.append(f"{path}:{start} monitor Slack diagnostic must use SLACK_WEBHOOK_URL secret")
+    if not _step_has_line(block, "run: python watch_cheeks.py monitor-diagnostic"):
+        errors.append(f"{path}:{start} monitor Slack diagnostic must run monitor-diagnostic")
+    return errors
+
+
 def validate_public_safe_workflow_contract(path: Path, lines: list[str]) -> list[str]:
     errors: list[str] = []
     text = "\n".join(lines)
@@ -223,6 +245,7 @@ def validate_public_safe_workflow_contract(path: Path, lines: list[str]) -> list
                 errors.append(f"{path} notify-failure job must not request contents: write")
         errors.extend(_validate_manual_artifact_contract(path, blocks))
         errors.extend(_validate_allow_fetch_failure_contract(path, blocks))
+        errors.extend(_validate_monitor_slack_diagnostic_contract(path, blocks))
 
     return errors
 

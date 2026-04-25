@@ -16,6 +16,7 @@ from watch_cheeks import (  # noqa: E402
     Settings,
     monitor,
     sanitize_html,
+    send_monitor_slack_diagnostic,
 )
 
 
@@ -193,6 +194,37 @@ def test_monitor_fetch_failure_warning_is_throttled(monkeypatch: pytest.MonkeyPa
     throttle_state = events["saved"][0]["warning_throttle"]["monitor_fetch_failure"]
     assert throttle_state["consecutive_runs"] == 2
     assert throttle_state["suppressed_runs"] == 1
+
+
+def test_monitor_slack_diagnostic_sends_synthetic_payload_without_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = {"notify": [], "summary": [], "save": 0}
+
+    monkeypatch.setattr(
+        "watch_cheeks.notify_slack",
+        lambda payload, settings, strict=False: events["notify"].append((payload, strict)),
+    )
+    monkeypatch.setattr(
+        "watch_cheeks.append_step_summary",
+        lambda title, sections, fallback: events["summary"].append((title, sections, fallback)),
+    )
+    monkeypatch.setattr("watch_cheeks.save_state", lambda state: events.__setitem__("save", events["save"] + 1))
+
+    send_monitor_slack_diagnostic(
+        make_settings(),
+        logical_today=datetime.fromisoformat("2024-01-10T12:00:00+09:00").date(),
+    )
+
+    assert events["save"] == 0
+    assert len(events["notify"]) == 1
+    payload, strict = events["notify"][0]
+    assert strict is True
+    assert "【診断】" in payload["text"]
+    assert "初回" in payload["text"]
+    assert "synthetic payload" in json.dumps(payload["blocks"], ensure_ascii=False)
+    assert len(events["summary"]) == 1
+    assert events["summary"][0][0] == watch_cheeks.STEP_SUMMARY_TITLE_MONITOR
 
 
 def test_load_settings_redacts_webhook_in_debug_log(monkeypatch: pytest.MonkeyPatch) -> None:

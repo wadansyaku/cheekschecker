@@ -85,6 +85,11 @@ def _monitor_workflow_lines(*, retention: str = "3") -> list[str]:
         "          name: monitor-state",
         "          path: monitor_state.json",
         "          retention-days: 3",
+        "      - name: Send monitor Slack diagnostic",
+        "        if: github.event_name == 'workflow_dispatch' && inputs.send_monitor_diagnostic",
+        "        env:",
+        "          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}",
+        "        run: python watch_cheeks.py monitor-diagnostic",
         "      - name: Commit public-safe monitor artifacts",
         "        run: |",
         "          git add monitor_state.json history_masked.json",
@@ -128,3 +133,18 @@ def test_monitor_artifact_contract_accepts_expected_shape() -> None:
     )
 
     assert errors == []
+
+
+def test_monitor_requires_manual_slack_diagnostic_step() -> None:
+    lines = [
+        line
+        for line in _monitor_workflow_lines()
+        if "Send monitor Slack diagnostic" not in line
+        and "inputs.send_monitor_diagnostic" not in line
+        and "SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}" not in line
+        and "run: python watch_cheeks.py monitor-diagnostic" not in line
+    ]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
+
+    assert any("Slack diagnostic step" in error for error in errors)

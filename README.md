@@ -26,6 +26,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 
 ## GitHub Actions の構成
 - `.github/workflows/monitor.yml`：10 分おき／手動で実行。`monitor_state.json` と `history_masked.json` を更新し、writer job で commit / push します。手動実行時はサニタイズ済み HTML も Artifact 化します。
+- `monitor.yml` の手動実行で `send_monitor_diagnostic=true` を指定すると、実予約データではない synthetic payload を使って monitor の Slack 通知分岐を強制送信します。この診断は `monitor_state.json` と `history_masked.json` を更新せず、Webhook 未設定や送信失敗は job failure として扱います。
 - `.github/workflows/summary_weekly.yml`：週次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。手動実行時は「Cheekschecker: Webhook OK」で疎通確認後に本投稿を行います。
 - `.github/workflows/summary_monthly.yml`：月次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。週次と同じ writer transaction で commit / push します。
 - すべてのワークフローで `TZ=Asia/Tokyo`、`ROBOTS_ENFORCE=1` を設定し、robots.txt を尊重します。
@@ -75,7 +76,8 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
    export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
    python watch_cheeks.py monitor
    ```
-3. サマリーのみ実行する場合は `python watch_cheeks.py summary --days 7 --raw-output weekly.json --no-notify` → `python summarize.py --period weekly --raw-data weekly.json` のように呼び出します。`--no-notify` を付けることで生データ取得時の Slack 投稿を抑止し、集計完了後の一度だけ通知されます。`summary_masked.json` に丸めた結果が残り、Slack には Block Kit が送信されます。
+3. monitor の Slack 通知分岐だけを診断する場合は `python watch_cheeks.py monitor-diagnostic` を実行します。synthetic payload のため実予約 state は変更せず、Slack 送信失敗はエラーとして扱います。
+4. サマリーのみ実行する場合は `python watch_cheeks.py summary --days 7 --raw-output weekly.json --no-notify` → `python summarize.py --period weekly --raw-data weekly.json` のように呼び出します。`--no-notify` を付けることで生データ取得時の Slack 投稿を抑止し、集計完了後の一度だけ通知されます。`summary_masked.json` に丸めた結果が残り、Slack には Block Kit が送信されます。
    - **履歴ファイルの競合対策**：`monitor_state.json`、`history_masked.json`、`summary_masked.json` は共通 writer transaction で更新します。手動実行前に `git pull --rebase --autostash` を走らせて最新化してください。
 
 ### ローカル開発の最短手順
@@ -97,7 +99,7 @@ scripts/check_local.sh
 - 本ツールは非公式・私的用途の支援を目的とし、対象サイトの利用規約や関連法令を代替するものではありません。疑義がある場合は速やかに連絡先（`UA_CONTACT`）へ報告してください。
 
 ## トラブルシュート
-- **Slack に投稿されない**：`SLACK_WEBHOOK_URL` が未設定か、Block Kit 投稿で失敗した可能性があります。ログの WARN/ERROR を確認し、必要なら手動で `python summarize.py --ping-only` を実行してください。
+- **Slack に投稿されない**：`SLACK_WEBHOOK_URL` が未設定か、Block Kit 投稿で失敗した可能性があります。ログの WARN/ERROR を確認し、summary の疎通は `python summarize.py --ping-only`、monitor 通知分岐の疎通は `python watch_cheeks.py monitor-diagnostic` で確認してください。
 - **push 失敗**：writer workflow は push failure を失敗として扱います。権限不足の場合は writer job に `contents: write` が付いているか確認してください。
 - **scheduled monitor / summary が timeout した**：`cheeks.nagoya` 側の一時障害なら warning skip になります。Slack warning と step summary を確認し、manual dispatch で再取得したい場合は `ALLOW_FETCH_FAILURE=0` のまま再実行してください。
 - **scheduled monitor の warning が何度も出る**：`WARNING_THROTTLE_MINUTES` 内の連続 fetch failure は Slack 投稿を抑制し、`monitor_state.json.warning_throttle.monitor_fetch_failure` に公開安全な回数だけを残します。

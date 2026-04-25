@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '5/10 * * * *'
   workflow_dispatch:
+    inputs:
+      send_monitor_diagnostic:
+        description: 'Send a synthetic public-safe monitor Slack notification'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -120,6 +126,12 @@ jobs:
           path: monitor_state.json
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: Send monitor Slack diagnostic
+        if: github.event_name == 'workflow_dispatch' && inputs.send_monitor_diagnostic
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python watch_cheeks.py monitor-diagnostic
 
       - name: Commit public-safe monitor artifacts
         run: |

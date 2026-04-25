@@ -443,7 +443,7 @@ def _build_slack_blocks(
     return blocks
 
 
-def notify_slack(payload: Dict[str, Any], settings: Settings) -> None:
+def notify_slack(payload: Dict[str, Any], settings: Settings, *, strict: bool = False) -> None:
     fallback_text = str(payload.get("text") or "Cheekschecker notification")
     _send_slack_message(
         settings.slack_webhook_url,
@@ -451,6 +451,7 @@ def notify_slack(payload: Dict[str, Any], settings: Settings) -> None:
         fallback_text,
         logger=LOGGER,
         retry_fallback=False,
+        raise_on_failure=strict,
     )
 
 
@@ -1073,6 +1074,82 @@ def process_notifications(
     return state
 
 
+def _build_monitor_diagnostic_entry(logical_today: date) -> DailyEntry:
+    return DailyEntry(
+        raw_date=logical_today,
+        business_day=logical_today,
+        day_of_month=logical_today.day,
+        dow_en=_business_dow_label(logical_today),
+        male=2,
+        female=6,
+        single_female=5,
+        total=8,
+        ratio=0.75,
+        considered=True,
+        meets=True,
+        required_single=3,
+    )
+
+
+def send_monitor_slack_diagnostic(
+    settings: Settings,
+    *,
+    logical_today: Optional[date] = None,
+) -> None:
+    """Send a synthetic public-safe monitor notification without mutating state."""
+    if logical_today is None:
+        logical_today = derive_business_day(datetime.now(tz=JST), settings.rollover_hours)
+
+    entry = _build_monitor_diagnostic_entry(logical_today)
+    stage_notifications = [(entry, "initial")]
+    newly_met = [entry]
+    changed_counts: list[DailyEntry] = []
+
+    diagnostic_lines = [
+        "monitor Slack 通知分岐の疎通診断です",
+        "実予約データではない synthetic payload です",
+        "monitor_state.json と history_masked.json は更新しません",
+    ]
+    sections = [("診断", diagnostic_lines)]
+    sections.extend(
+        _build_notification_sections(
+            stage_notifications,
+            newly_met,
+            changed_counts,
+            logical_today,
+        )
+    )
+    fallback = "【診断】monitor Slack 通知分岐の疎通確認\n" + build_fallback_text(
+        stage_notifications,
+        newly_met,
+        changed_counts,
+        logical_today,
+    )
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Cheekschecker Monitor Diagnostic*\n実予約データではない synthetic payload です。",
+            },
+        }
+    ]
+    blocks.extend(
+        _build_slack_blocks(
+            stage_notifications,
+            newly_met,
+            changed_counts,
+            logical_today,
+            settings,
+        )
+    )
+    payload = {"text": fallback, "blocks": blocks}
+
+    append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, fallback)
+    notify_slack(payload, settings, strict=True)
+    LOGGER.info("Monitor Slack diagnostic notification sent")
+
+
 def select_summary_bundle(entries: Sequence[DailyEntry], *, logical_today: date, days: int) -> SummaryBundle:
     start = logical_today - timedelta(days=days - 1)
     period_days = [entry for entry in entries if start <= entry.business_day <= logical_today]
@@ -1419,6 +1496,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     monitor_parser = subparsers.add_parser("monitor", help="Run monitoring notifications")
     monitor_parser.add_argument("--sanitized-output", type=Path, help="Path to save sanitized HTML")
 
+    subparsers.add_parser(
+        "monitor-diagnostic",
+        help="Send a synthetic public-safe monitor Slack diagnostic",
+    )
+
     summary_parser = subparsers.add_parser("summary", help="Send weekly/monthly summary")
     summary_parser.add_argument("--days", type=int, choices=[7, 30], required=True, help="Summary window in days")
     summary_parser.add_argument("--raw-output", type=Path, help="Path to store raw summary dataset")
@@ -1439,6 +1521,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if args.command in {None, "monitor"}:
         sanitized_path = getattr(args, "sanitized_output", None)
         monitor(settings, output_sanitized=sanitized_path)
+    elif args.command == "monitor-diagnostic":
+        send_monitor_slack_diagnostic(settings)
     elif args.command == "summary":
         raw_output = getattr(args, "raw_output", None)
         summary(settings, days=args.days, raw_output=raw_output, notify=not args.no_notify)
