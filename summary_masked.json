@@ -1,5 +1,21 @@
 {
   "monthly": {
+    "coverage": {
+      "current": {
+        "masked_days": 0,
+        "missing_days": 29,
+        "observed_days": 1,
+        "raw_days": 1,
+        "target_days": 30
+      },
+      "previous": {
+        "masked_days": 0,
+        "missing_days": 30,
+        "observed_days": 0,
+        "raw_days": 0,
+        "target_days": 30
+      }
+    },
     "day_count": 1,
     "generated_at": "2026-04-01T14:09:03.309269+09:00",
     "mask_level": 1,
@@ -50,88 +66,91 @@
         "single": "0",
         "total": "<10"
       }
-    },
-    "coverage": {
-      "current": {
-        "target_days": 30,
-        "observed_days": 1,
-        "raw_days": 1,
-        "masked_days": 0,
-        "missing_days": 29
-      },
-      "previous": {
-        "target_days": 30,
-        "observed_days": 0,
-        "raw_days": 0,
-        "masked_days": 0,
-        "missing_days": 30
-      }
     }
   },
   "weekly": {
+    "coverage": {
+      "current": {
+        "masked_days": 0,
+        "missing_days": 0,
+        "observed_days": 7,
+        "raw_days": 7,
+        "target_days": 7
+      },
+      "previous": {
+        "masked_days": 0,
+        "missing_days": 0,
+        "observed_days": 7,
+        "raw_days": 7,
+        "target_days": 7
+      }
+    },
     "day_count": 7,
-    "generated_at": "2026-04-20T13:30:38.214247+09:00",
+    "generated_at": "2026-04-25T13:25:41.091914+09:00",
     "mask_level": 1,
     "mode": "public-safe",
-    "period_end": "2026-04-20",
-    "period_start": "2026-04-14",
+    "period_end": "2026-04-25",
+    "period_start": "2026-04-19",
     "stats": {
       "female": {
-        "average": "7-8",
+        "average": "5-6",
         "max": "9+",
-        "median": "7-8"
+        "median": "5-6"
       },
       "ratio": {
         "average": "<40%",
-        "max": "40±",
+        "max": "50±",
         "median": "<40%"
       },
       "single": {
-        "average": "3-4",
-        "max": "9+",
-        "median": "3-4"
+        "average": "2",
+        "max": "5-6",
+        "median": "2"
       },
       "total": {
-        "average": "20-29",
+        "average": "10-19",
         "max": "30-49",
-        "median": "20-29"
+        "median": "10-19"
       }
     },
     "status": "ok",
     "top_days": [
       {
-        "female": "9+",
-        "label": "18日(土)",
-        "ratio": "40±",
-        "single": "9+",
-        "total": "30-49"
+        "female": "2",
+        "label": "25日(土)",
+        "ratio": "50±",
+        "single": "2",
+        "source": "raw",
+        "total": "<10"
+      },
+      {
+        "female": "5-6",
+        "label": "21日(火)",
+        "ratio": "<40%",
+        "single": "3-4",
+        "source": "raw",
+        "total": "10-19"
       },
       {
         "female": "9+",
         "label": "19日(日)",
         "ratio": "<40%",
         "single": "5-6",
+        "source": "raw",
         "total": "20-29"
-      },
-      {
-        "female": "9+",
-        "label": "17日(金)",
-        "ratio": "<40%",
-        "single": "3-4",
-        "total": "30-49"
       }
     ],
     "trend": {
-      "female": "flat",
-      "ratio": "down",
-      "single": "up"
+      "female": "down",
+      "ratio": "flat",
+      "single": "down"
     },
     "weekday_profile": {
       "土": {
-        "female": "9+",
-        "ratio": "40±",
-        "single": "9+",
-        "total": "30-49"
+        "female": "2",
+        "ratio": "50±",
+        "single": "2",
+        "total": "<10"
       },
       "日": {
         "female": "9+",
@@ -146,44 +165,28 @@
         "total": "<10"
       },
       "木": {
-        "female": "5-6",
+        "female": "1",
         "ratio": "<40%",
-        "single": "3-4",
-        "total": "10-19"
+        "single": "0",
+        "total": "<10"
       },
       "水": {
-        "female": "5-6",
+        "female": "9+",
         "ratio": "<40%",
         "single": "2",
         "total": "20-29"
       },
       "火": {
-        "female": "7-8",
+        "female": "5-6",
         "ratio": "<40%",
         "single": "3-4",
-        "total": "20-29"
+        "total": "10-19"
       },
       "金": {
         "female": "9+",
         "ratio": "<40%",
-        "single": "3-4",
+        "single": "1",
         "total": "30-49"
-      }
-    },
-    "coverage": {
-      "current": {
-        "target_days": 7,
-        "observed_days": 7,
-        "raw_days": 7,
-        "masked_days": 0,
-        "missing_days": 0
-      },
-      "previous": {
-        "target_days": 7,
-        "observed_days": 7,
-        "raw_days": 7,
-        "masked_days": 0,
-        "missing_days": 0
       }
     }
   }
