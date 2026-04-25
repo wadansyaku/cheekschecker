@@ -23,7 +23,7 @@
     "2026-04-25": {
       "last_notified_at": 1777117958,
       "met": true,
-      "stage": "bonus"
+      "stage": "initial"
     },
     "2026-04-26": {
       "last_notified_at": null,
@@ -32,8 +32,8 @@
     }
   },
   "etag": null,
-  "generated_at": "2026-04-25T23:06:21.726541+09:00",
-  "last_fetched_at": "2026-04-25T23:06:21.692627+09:00",
+  "generated_at": "2026-04-26T00:02:23.828652+09:00",
+  "last_fetched_at": "2026-04-26T00:02:23.795871+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
