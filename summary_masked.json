@@ -86,42 +86,42 @@
       }
     },
     "day_count": 7,
-    "generated_at": "2026-04-25T13:25:41.091914+09:00",
+    "generated_at": "2026-04-27T13:41:55.067583+09:00",
     "mask_level": 1,
     "mode": "public-safe",
-    "period_end": "2026-04-25",
-    "period_start": "2026-04-19",
+    "period_end": "2026-04-27",
+    "period_start": "2026-04-21",
     "stats": {
       "female": {
-        "average": "5-6",
+        "average": "9+",
         "max": "9+",
-        "median": "5-6"
+        "median": "9+"
       },
       "ratio": {
         "average": "<40%",
-        "max": "50±",
+        "max": "<40%",
         "median": "<40%"
       },
       "single": {
-        "average": "2",
-        "max": "5-6",
+        "average": "3-4",
+        "max": "9+",
         "median": "2"
       },
       "total": {
-        "average": "10-19",
+        "average": "20-29",
         "max": "30-49",
-        "median": "10-19"
+        "median": "20-29"
       }
     },
     "status": "ok",
     "top_days": [
       {
-        "female": "2",
+        "female": "9+",
         "label": "25日(土)",
-        "ratio": "50±",
-        "single": "2",
+        "ratio": "<40%",
+        "single": "9+",
         "source": "raw",
-        "total": "<10"
+        "total": "30-49"
       },
       {
         "female": "5-6",
@@ -133,30 +133,30 @@
       },
       {
         "female": "9+",
-        "label": "19日(日)",
+        "label": "26日(日)",
         "ratio": "<40%",
         "single": "5-6",
         "source": "raw",
-        "total": "20-29"
+        "total": "30-49"
       }
     ],
     "trend": {
-      "female": "down",
+      "female": "up",
       "ratio": "flat",
-      "single": "down"
+      "single": "flat"
     },
     "weekday_profile": {
       "土": {
-        "female": "2",
-        "ratio": "50±",
-        "single": "2",
-        "total": "<10"
+        "female": "9+",
+        "ratio": "<40%",
+        "single": "9+",
+        "total": "30-49"
       },
       "日": {
         "female": "9+",
         "ratio": "<40%",
         "single": "5-6",
-        "total": "20-29"
+        "total": "30-49"
       },
       "月": {
         "female": "0",
