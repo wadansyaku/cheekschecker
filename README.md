@@ -11,7 +11,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - `monitor` ワークフローでは Playwright を用いた取得、`monitor_state.json` の更新、`history_masked.json` の更新、Block Kit での投稿を行います。robots.txt が `Disallow` の場合は WARN ログを出して解析をスキップし、Slack には投稿しません。
 - scheduled workflow では upstream の一時的な接続失敗を warning skip として扱います。外部サイト timeout だけでは job failure にせず、step summary / Slack warning で観測します。Slack warning は `WARNING_THROTTLE_MINUTES` で抑制し、公開状態には時刻・回数・粗いカテゴリだけを保存します。
 - 取得前に HEAD リクエストで ETag / Last-Modified を確認し、未更新であればフェッチをスキップします。ただし `last_fetched_at` が古い、または未記録の場合は強制的に再取得します。結果は GitHub Step Summary にも反映され、Slack と整合します。
-- Slack へ送った内容（または「該当なし」）は常に `GITHUB_STEP_SUMMARY` に同じ構成で追記されます。過去履歴を GitHub 上で確認しやすくしています。
+- monitor の Slack 通知は実通知用の詳細を保ちますが、`GITHUB_STEP_SUMMARY` には raw counts ではなく public-safe band 表現を追記します。過去履歴を GitHub 上で確認しやすくしつつ、公開面へ exact 値を残しません。
 - 公開リポジトリに残す monitor 状態は `monitor_state.json` に限定し、`days[date]` には `met`、`stage`、`last_notified_at` だけを保存します。`last_fetched_at` は HEAD skip の鮮度判定用、`warning_throttle` は warning 抑制用の公開安全な operational metadata です。raw counts、exact ratio、例外メッセージは保存しません。
 
 ## 週次／月次サマリー（summary）
@@ -19,7 +19,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - `summarize.py` は `history_masked.json` と当該 run の raw dataset を使って、public-safe approximation の summary を生成します。長期の exact reconstruction は行いません。
 - Slack には Block Kit（header → context → fields（今日/近日）→ Top3 → actions）を基本として投稿します。表現は band / trend / rank ベースで、raw average を装う exact wording は避けます。エラー時のみプレーンテキストへフォールバックします。
 - サマリーで生成した情報は GitHub Step Summary にも同じブロック構成で記録され、レポートの監査・再確認が容易です。
-- `summary_masked.json` は `weekly` / `monthly` キーを維持しつつ、`mode: "public-safe"` と `coverage` metadata を含みます。
+- `summary_masked.json` は `weekly` / `monthly` キーを維持しつつ、`mode: "public-safe"`、`status`、`coverage` metadata を含みます。取得元が利用できない場合は stale な成功結果を残さず `status: "source-unavailable"` に更新します。
 - リポジトリにコミットされるのは `monitor_state.json`、`summary_masked.json`、`history_masked.json` で、いずれも公開安全な情報だけを保持します（個人名・生値・raw counts は保存しません）。
 - `--raw-output` を指定したり `--no-notify` を付けて実行すると Slack 投稿は行わず、生データ収集だけを行えます。summary raw dataset は exact 値を含むため、GitHub Actions では manual dispatch の短期診断 artifact としてのみアップロードします。
 - summary ワークフローは monitor と同じ writer transaction で動き、push failure は失敗として扱います。
@@ -58,7 +58,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 | `ROLLOVER_HOURS_JSON` | 曜日別ロールオーバー設定 | 営業日ロールオーバーの締め時刻（JST） |
 | `MASK_LEVEL` | マスキング強度 | `history_masked.json` / `summary_masked.json` の帯域粒度 |
 | `MASK_CONFIG_PATH` | マスキング設定 JSON | band 定義を差し替える場合のみ使用します |
-| `ROBOTS_ENFORCE` | robots.txt 準拠 | `1` で Disallow を尊重し、取得をスキップ（Slack 通知は無し） |
+| `ROBOTS_ENFORCE` | robots.txt 準拠 | `1` で Disallow を尊重します。monitor は取得と Slack 通知をスキップし、summary は source-unavailable marker を残します |
 | `ALLOW_FETCH_FAILURE` | 外部取得失敗の graceful degrade | scheduled workflow では `1`。upstream timeout を warning skip に落とし、manual dispatch では `0` のまま fail させます |
 | `UA_CONTACT` | User-Agent 連絡先 | 監視主体の連絡先メールなど |
 | `HEAD_SKIP_MAX_AGE_MINUTES` | HEAD 未更新時の最大 skip 鮮度 | 既定は 180。`0` で HEAD skip を無効化し、毎回取得します |
@@ -95,7 +95,7 @@ scripts/check_local.sh
 - Playwright ブラウザの再インストールを省きたい場合は `SKIP_PLAYWRIGHT_INSTALL=1 scripts/bootstrap_local.sh` を使えます。
 
 ## プライバシーと法務
-- `ROBOTS_ENFORCE=1` のときは `/robots.txt` を取得し、対象パスが `Disallow` の場合は WARN ログを出して解析・Slack 投稿を行いません。
+- `ROBOTS_ENFORCE=1` のときは `/robots.txt` を取得し、対象パスが `Disallow` の場合は WARN ログを出して解析を行いません。summary では raw dataset に source-unavailable marker を書き、後続の public-safe summary に反映します。
 - 公開保存物は `monitor_state.json`、`history_masked.json`、`summary_masked.json` のみで、いずれも公開安全な状態だけを保持します。個人名、free text、raw counts、生データは残しません。
 - 本ツールは非公式・私的用途の支援を目的とし、対象サイトの利用規約や関連法令を代替するものではありません。疑義がある場合は速やかに連絡先（`UA_CONTACT`）へ報告してください。
 
@@ -106,7 +106,7 @@ scripts/check_local.sh
 - **scheduled monitor の warning が何度も出る**：`WARNING_THROTTLE_MINUTES` 内の連続 fetch failure は Slack 投稿を抑制し、`monitor_state.json.warning_throttle.monitor_fetch_failure` に公開安全な回数だけを残します。
 - **Playwright の依存不足**：`python -m playwright install --with-deps chromium` を再実行してください。CI では毎回実行しています。
 - **空データ期間**：`summarize.py` が「No data for this period / 集計対象なし」を Slack へ投稿し、ジョブは成功扱いになります。
-- **robots.txt で拒否された**：WARN ログが出て処理がスキップされます。対象 URL を見直すか、運用責任者に確認してください。
+- **robots.txt で拒否された**：monitor は WARN ログを出して通知をスキップします。summary は `source-unavailable` として記録されます。対象 URL を見直すか、運用責任者に確認してください。
 
 ## テスト
 `pytest` でユニットテストを実行できます。通知ロジックやサマリー集計のマスキングをカバーしています。

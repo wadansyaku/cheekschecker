@@ -97,7 +97,7 @@ jobs:
         with:
           name: weekly-summary-raw
           path: weekly_summary_raw.json
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 3
 
       - name: Generate weekly summary & notify
@@ -128,35 +128,53 @@ jobs:
       - name: Notify Slack on failure
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          WORKFLOW_NAME: Weekly Summary
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ -n "$SLACK_WEBHOOK_URL" ]; then
-            curl -X POST "$SLACK_WEBHOOK_URL" \
-              -H 'Content-Type: application/json' \
-              -d "{
-                \"text\": \"❌ Workflow Failed: Weekly Summary\",
-                \"blocks\": [{
-                  \"type\": \"header\",
-                  \"text\": {
-                    \"type\": \"plain_text\",
-                    \"text\": \"❌ Workflow Failed\",
-                    \"emoji\": false
-                  }
-                }, {
-                  \"type\": \"section\",
-                  \"text\": {
-                    \"type\": \"mrkdwn\",
-                    \"text\": \"*Workflow:* Weekly Summary\\n*Branch:* \`${{ github.ref_name }}\`\\n*Trigger:* ${{ github.event_name }}\"
-                  }
-                }, {
-                  \"type\": \"actions\",
-                  \"elements\": [{
-                    \"type\": \"button\",
-                    \"text\": {
-                      \"type\": \"plain_text\",
-                      \"text\": \"View Logs\"
-                    },
-                    \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
-                  }]
-                }]
-              }"
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL is not set; skipping failure notification"
+            exit 0
+          fi
+          python - <<'PY' > slack_failure_payload.json
+          import json
+          import os
+
+          workflow = os.environ.get("WORKFLOW_NAME", "Cheekschecker")
+          ref_name = os.environ.get("REF_NAME", "")
+          event_name = os.environ.get("EVENT_NAME", "")
+          run_url = os.environ.get("RUN_URL", "")
+          payload = {
+              "text": f"Workflow Failed: {workflow}",
+              "blocks": [
+                  {
+                      "type": "header",
+                      "text": {"type": "plain_text", "text": "Workflow Failed", "emoji": False},
+                  },
+                  {
+                      "type": "section",
+                      "text": {
+                          "type": "mrkdwn",
+                          "text": f"*Workflow:* {workflow}\n*Branch:* `{ref_name}`\n*Trigger:* {event_name}",
+                      },
+                  },
+                  {
+                      "type": "actions",
+                      "elements": [
+                          {
+                              "type": "button",
+                              "text": {"type": "plain_text", "text": "View Logs"},
+                              "url": run_url,
+                          }
+                      ],
+                  },
+              ],
+          }
+          print(json.dumps(payload, ensure_ascii=False))
+          PY
+          if ! curl --fail-with-body --show-error --silent -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            --data-binary @slack_failure_payload.json; then
+            echo "Slack failure notification failed" >&2
           fi

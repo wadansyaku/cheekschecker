@@ -30,6 +30,19 @@ WRITER_COMMIT_TARGETS = {
     "summary_monthly.yml": "git add monitor_state.json history_masked.json summary_masked.json",
 }
 
+SUMMARY_CONTRACTS = {
+    "summary_weekly.yml": {
+        "period": "weekly",
+        "days": "7",
+        "raw_output": "weekly_summary_raw.json",
+    },
+    "summary_monthly.yml": {
+        "period": "monthly",
+        "days": "30",
+        "raw_output": "monthly_summary_raw.json",
+    },
+}
+
 NODE24_OPT_IN = "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'"
 LEGACY_NODE20_ACTION_REFS = (
     "actions/checkout@v4",
@@ -183,6 +196,10 @@ def _step_has_line(block: list[str], expected: str) -> bool:
     return any(line.strip() == expected for line in block)
 
 
+def _block_contains(block: list[str], needle: str) -> bool:
+    return any(needle in line for line in block)
+
+
 def _validate_manual_artifact_contract(
     path: Path,
     blocks: list[tuple[int, list[str]]],
@@ -202,6 +219,8 @@ def _validate_manual_artifact_contract(
             )
         if not _step_has_line(block, "retention-days: 3"):
             errors.append(f"{path}:{start} artifact {artifact_name} must use retention-days: 3")
+        if not _step_has_line(block, "if-no-files-found: error"):
+            errors.append(f"{path}:{start} artifact {artifact_name} must fail when missing")
         if not _step_has_line(block, f"path: {artifact_path}"):
             errors.append(f"{path}:{start} artifact {artifact_name} must upload {artifact_path}")
     return errors
@@ -215,8 +234,12 @@ def _validate_allow_fetch_failure_contract(
     if path.name == "monitor.yml":
         scheduled = _find_step_block(blocks, "Run monitor (scheduled)")
         manual = _find_step_block(blocks, "Run monitor with sanitized artifact")
+        if scheduled is None or not _step_has_line(scheduled[1], "if: github.event_name == 'schedule'"):
+            errors.append(f"{path} scheduled monitor must be gated to github.event_name == 'schedule'")
         if scheduled is None or not _step_has_line(scheduled[1], "ALLOW_FETCH_FAILURE: '1'"):
             errors.append(f"{path} scheduled monitor must set ALLOW_FETCH_FAILURE: '1'")
+        if manual is None or not _step_has_line(manual[1], "if: github.event_name == 'workflow_dispatch'"):
+            errors.append(f"{path} manual monitor must be gated to workflow_dispatch")
         if manual is None or not _step_has_line(manual[1], "ALLOW_FETCH_FAILURE: '0'"):
             errors.append(f"{path} manual monitor must set ALLOW_FETCH_FAILURE: '0'")
     elif path.name in {"summary_weekly.yml", "summary_monthly.yml"}:
@@ -227,6 +250,23 @@ def _validate_allow_fetch_failure_contract(
                 f"{path} summary collection must set ALLOW_FETCH_FAILURE to schedule-only graceful mode"
             )
     return errors
+
+
+def _validate_monitor_dispatch_input_contract(path: Path, lines: list[str]) -> list[str]:
+    if path.name != "monitor.yml":
+        return []
+
+    required = (
+        "send_monitor_diagnostic:",
+        "description: 'Send a synthetic public-safe monitor Slack notification'",
+        "required: false",
+        "default: false",
+        "type: boolean",
+    )
+    missing = [line for line in required if not _contains_line(lines, line)]
+    if missing:
+        return [f"{path} monitor diagnostic workflow_dispatch input is missing: {', '.join(missing)}"]
+    return []
 
 
 def _validate_monitor_slack_diagnostic_contract(
@@ -248,6 +288,112 @@ def _validate_monitor_slack_diagnostic_contract(
         errors.append(f"{path}:{start} monitor Slack diagnostic must use SLACK_WEBHOOK_URL secret")
     if not _step_has_line(block, "run: python watch_cheeks.py monitor-diagnostic"):
         errors.append(f"{path}:{start} monitor Slack diagnostic must run monitor-diagnostic")
+    return errors
+
+
+def _validate_summary_contract(
+    path: Path,
+    blocks: list[tuple[int, list[str]]],
+) -> list[str]:
+    contract = SUMMARY_CONTRACTS.get(path.name)
+    if contract is None:
+        return []
+
+    errors: list[str] = []
+    period = contract["period"]
+    days = contract["days"]
+    raw_output = contract["raw_output"]
+
+    ping = _find_step_block(blocks, "--ping-only")
+    if ping is None:
+        errors.append(f"{path} manual summary workflow must include a Slack webhook ping")
+    else:
+        start, block = ping
+        if not _step_has_line(block, "if: github.event_name == 'workflow_dispatch'"):
+            errors.append(f"{path}:{start} summary Slack ping must be workflow_dispatch-only")
+        if not _step_has_line(block, "SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}"):
+            errors.append(f"{path}:{start} summary Slack ping must use SLACK_WEBHOOK_URL secret")
+        if not _step_has_line(block, f"run: python summarize.py --period {period} --ping-only"):
+            errors.append(f"{path}:{start} summary Slack ping must use period {period}")
+
+    collect = _find_step_block(blocks, f"Collect {period} dataset")
+    if collect is None:
+        errors.append(f"{path} summary workflow must collect the {period} dataset")
+    else:
+        start, block = collect
+        expected_run = (
+            f"run: python watch_cheeks.py summary --days {days} "
+            f"--raw-output {raw_output} --no-notify"
+        )
+        if not _step_has_line(block, expected_run):
+            errors.append(f"{path}:{start} summary collection must write {raw_output} without notifying")
+
+    notify = _find_step_block(blocks, f"Generate {period} summary & notify")
+    if notify is None:
+        errors.append(f"{path} summary workflow must generate and notify the {period} summary")
+    else:
+        start, block = notify
+        if not _step_has_line(block, "SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}"):
+            errors.append(f"{path}:{start} summary notify must use SLACK_WEBHOOK_URL secret")
+        expected_run = (
+            f"run: python summarize.py --period {period} --raw-data {raw_output} "
+            "--history history_masked.json --output summary_masked.json"
+        )
+        if not _step_has_line(block, expected_run):
+            errors.append(f"{path}:{start} summary notify must consume {raw_output}")
+
+    return errors
+
+
+def _validate_notify_failure_contract(
+    path: Path,
+    text: str,
+    blocks: list[tuple[int, list[str]]],
+) -> list[str]:
+    if "notify-failure:" not in text:
+        return []
+
+    notify_failure_section = text.split("notify-failure:", 1)[1]
+    errors: list[str] = []
+    if "contents: write" in notify_failure_section:
+        errors.append(f"{path} notify-failure job must not request contents: write")
+
+    notify_step = _find_step_block(blocks, "Notify Slack on failure")
+    if notify_step is None:
+        errors.append(f"{path} notify-failure job must include a Slack notification step")
+        return errors
+
+    start, block = notify_step
+    if not _step_has_line(block, "SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}"):
+        errors.append(f"{path}:{start} notify-failure must use SLACK_WEBHOOK_URL secret")
+    if not _block_contains(block, 'if [ -z "$SLACK_WEBHOOK_URL" ]; then'):
+        errors.append(f"{path}:{start} notify-failure must skip cleanly when Slack webhook is unset")
+    if not _block_contains(block, 'curl --fail-with-body --show-error --silent -X POST "$SLACK_WEBHOOK_URL"'):
+        errors.append(f"{path}:{start} notify-failure curl must fail on Slack HTTP errors")
+    if not _block_contains(block, "json.dumps(payload, ensure_ascii=False)"):
+        errors.append(f"{path}:{start} notify-failure must JSON-encode the Slack payload")
+    if not _block_contains(block, "--data-binary @slack_failure_payload.json"):
+        errors.append(f"{path}:{start} notify-failure must post a generated Slack payload file")
+    block_text = "\n".join(block)
+    if '-d "{' in block_text or "--data '{" in block_text:
+        errors.append(f"{path}:{start} notify-failure must not inline raw JSON in shell")
+    has_run_url_env = _block_contains(
+        block,
+        "RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+    )
+    uses_run_url = _block_contains(block, 'run_url = os.environ.get("RUN_URL", "")') and _block_contains(
+        block,
+        '"url": run_url',
+    )
+    if not has_run_url_env or not uses_run_url:
+        errors.append(f"{path}:{start} notify-failure must link to the current workflow run")
+    has_event_env = _block_contains(block, "EVENT_NAME: ${{ github.event_name }}")
+    uses_event_name = _block_contains(
+        block,
+        'event_name = os.environ.get("EVENT_NAME", "")',
+    ) and _block_contains(block, "*Trigger:* {event_name}")
+    if not has_event_env or not uses_event_name:
+        errors.append(f"{path}:{start} notify-failure must include the trigger in Slack output")
     return errors
 
 
@@ -284,13 +430,15 @@ def validate_public_safe_workflow_contract(path: Path, lines: list[str]) -> list
         expected_add = WRITER_COMMIT_TARGETS[path_name]
         if not _contains_line(lines, expected_add):
             errors.append(f"{path} writer workflow must commit exactly: {expected_add}")
-        if "notify-failure:" in text:
-            notify_failure_section = text.split("notify-failure:", 1)[1]
-            if "contents: write" in notify_failure_section:
-                errors.append(f"{path} notify-failure job must not request contents: write")
+        if not _contains_line(lines, "git push origin HEAD:${{ github.ref_name }}"):
+            errors.append(f"{path} writer workflow must push to the current ref with git push origin HEAD:${{ github.ref_name }}")
+        errors.extend(_validate_monitor_dispatch_input_contract(path, lines))
         errors.extend(_validate_manual_artifact_contract(path, blocks))
         errors.extend(_validate_allow_fetch_failure_contract(path, blocks))
         errors.extend(_validate_monitor_slack_diagnostic_contract(path, blocks))
+        errors.extend(_validate_summary_contract(path, blocks))
+
+    errors.extend(_validate_notify_failure_contract(path, text, blocks))
 
     return errors
 

@@ -181,6 +181,54 @@ def test_summary_uses_placeholder_when_context_is_missing(monkeypatch: pytest.Mo
     assert captured == [{"text": "placeholder"}]
 
 
+def test_summary_uses_placeholder_when_context_builder_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = make_bundle()
+    stub_summary_dependencies(monkeypatch, bundle, {"text": "ignored"})
+
+    def raise_context(*args, **kwargs):
+        raise RuntimeError("stale history")
+
+    monkeypatch.setattr("watch_cheeks.public_summary.build_summary_context", raise_context)
+
+    captured = []
+
+    def fake_notify(body, settings) -> None:
+        captured.append(body)
+
+    monkeypatch.setattr("watch_cheeks.notify_slack", fake_notify)
+
+    summary(make_settings(), days=7)
+
+    assert len(captured) == 1
+    assert "集計対象なし" in captured[0]["text"]
+
+
+def test_summary_uses_placeholder_when_slack_payload_builder_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = make_bundle()
+    stub_summary_dependencies(monkeypatch, bundle, {"text": "ignored"})
+
+    def raise_payload(*args, **kwargs):
+        raise RuntimeError("unexpected context")
+
+    monkeypatch.setattr("watch_cheeks.public_summary.build_slack_payload", raise_payload)
+
+    captured = []
+
+    def fake_notify(body, settings) -> None:
+        captured.append(body)
+
+    monkeypatch.setattr("watch_cheeks.notify_slack", fake_notify)
+
+    summary(make_settings(), days=7)
+
+    assert len(captured) == 1
+    assert "could not be built" in captured[0]["text"]
+
+
 def test_summary_writes_fetch_failure_marker_when_allowed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -204,6 +252,27 @@ def test_summary_writes_fetch_failure_marker_when_allowed(
     payload = json.loads(raw_path.read_text(encoding="utf-8"))
     assert payload["fetch_status"] == "unavailable"
     assert "connect timeout" in payload["fetch_error"]
+    assert captured == []
+
+
+def test_summary_writes_robots_failure_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured = []
+    monkeypatch.setattr("watch_cheeks.check_robots_allow", lambda settings: False)
+    monkeypatch.setattr("watch_cheeks.notify_slack", lambda body, settings: captured.append(body))
+
+    raw_path = tmp_path / "weekly_summary_raw.json"
+    summary(
+        make_settings(),
+        days=7,
+        raw_output=raw_path,
+        notify=False,
+    )
+
+    payload = json.loads(raw_path.read_text(encoding="utf-8"))
+    assert payload["fetch_status"] == "unavailable"
+    assert "robots.txt" in payload["fetch_error"]
     assert captured == []
 
 

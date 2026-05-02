@@ -123,6 +123,41 @@ def _coerce_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _safe_display_text(value: Any, *, fallback: str = "-", max_length: int = 1200) -> str:
+    if value is None:
+        return fallback
+    text = str(value).strip()
+    if not text:
+        return fallback
+    text = "".join(ch for ch in text if ch in {"\n", "\t"} or ord(ch) >= 32)
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 3] + "..."
+
+
+def _record_items(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _daily_records(value: Any) -> List[DailyRecord]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, DailyRecord)]
+
+
+def _summary_records(value: Any) -> List[SummaryRecord]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, SummaryRecord)]
+
+
+def _fetch_status(value: Any) -> str:
+    text = str(value or "ok").strip().lower()
+    return text or "ok"
+
+
 def _record_from_dict(data: Dict[str, Any]) -> Optional[DailyRecord]:
     business_day = _parse_iso_date(data.get("date"))
     if business_day is None:
@@ -146,11 +181,12 @@ def _record_from_dict(data: Dict[str, Any]) -> Optional[DailyRecord]:
 
 
 def raw_dataset_from_dict(raw: Dict[str, Any]) -> RawDataset:
-    current = [_record_from_dict(item) for item in raw.get("days", []) if isinstance(item, dict)]
+    if not isinstance(raw, dict):
+        return RawDataset(period_label="", window_days=0, logical_today=None, current=[], previous=[])
+    current = [_record_from_dict(item) for item in _record_items(raw.get("days"))]
     previous = [
         _record_from_dict(item)
-        for item in raw.get("previous_days", [])
-        if isinstance(item, dict)
+        for item in _record_items(raw.get("previous_days"))
     ]
     return RawDataset(
         period_label=str(raw.get("period_label") or "").strip(),
@@ -158,7 +194,7 @@ def raw_dataset_from_dict(raw: Dict[str, Any]) -> RawDataset:
         logical_today=_parse_iso_date(raw.get("logical_today")),
         current=[item for item in current if item is not None],
         previous=[item for item in previous if item is not None],
-        fetch_status=str(raw.get("fetch_status") or "ok"),
+        fetch_status=_fetch_status(raw.get("fetch_status")),
         fetch_error=str(raw.get("fetch_error") or "").strip() or None,
     )
 
@@ -445,8 +481,13 @@ def build_summary_context(
     *,
     masking_config: MaskingConfig = DEFAULT_MASKING_CONFIG,
 ) -> Optional[SummaryContext]:
-    window_days = dataset.window_days or SUMMARY_MODES.get(period_key, 7)
-    raw_days = dataset.current
+    if _fetch_status(dataset.fetch_status) != "ok":
+        return None
+
+    default_window_days = SUMMARY_MODES.get(period_key, 7)
+    parsed_window_days = _coerce_int(dataset.window_days, default_window_days)
+    window_days = parsed_window_days if parsed_window_days > 0 else default_window_days
+    raw_days = _daily_records(dataset.current)
     logical_today = dataset.logical_today
     if logical_today is None and raw_days:
         logical_today = max(record.business_day for record in raw_days)
@@ -454,15 +495,20 @@ def build_summary_context(
         return None
 
     current_days, previous_days = _target_days(logical_today, window_days)
+    if not isinstance(history_meta, dict):
+        history_meta = {}
     history_days = history_meta.get("days", {})
     if not isinstance(history_days, dict):
         history_days = {}
 
     current_records, coverage_current = _build_window_records(
-        current_days, dataset.current, history_days, masking_config
+        current_days, raw_days, history_days, masking_config
     )
     previous_records, coverage_previous = _build_window_records(
-        previous_days, dataset.previous, history_days, masking_config
+        previous_days,
+        _daily_records(dataset.previous),
+        history_days,
+        masking_config,
     )
     if not current_records:
         return None
@@ -512,10 +558,19 @@ def _format_latest_field(latest: SummaryRecord) -> List[str]:
 
 
 def _format_representation_field(stats: Dict[str, Dict[str, str]]) -> List[str]:
+    if not isinstance(stats, dict):
+        stats = {}
+
+    def stat(metric: str, key: str) -> str:
+        metric_stats = stats.get(metric)
+        if not isinstance(metric_stats, dict):
+            return "-"
+        return _safe_display_text(metric_stats.get(key), fallback="-", max_length=80)
+
     return [
-        f"平均帯域 単女{stats['single']['average']} 女{stats['female']['average']} 比率{stats['ratio']['average']}",
-        f"中央値帯域 単女{stats['single']['median']} 女{stats['female']['median']} 比率{stats['ratio']['median']}",
-        f"最大帯域 単女{stats['single']['max']} 女{stats['female']['max']} 比率{stats['ratio']['max']}",
+        f"平均帯域 単女{stat('single', 'average')} 女{stat('female', 'average')} 比率{stat('ratio', 'average')}",
+        f"中央値帯域 単女{stat('single', 'median')} 女{stat('female', 'median')} 比率{stat('ratio', 'median')}",
+        f"最大帯域 単女{stat('single', 'max')} 女{stat('female', 'max')} 比率{stat('ratio', 'max')}",
     ]
 
 
@@ -542,24 +597,36 @@ def _format_trend_value(direction: str) -> str:
 
 
 def _format_weekday_profile_line(weekday_profile: Dict[int, Dict[str, str]]) -> str:
+    if not isinstance(weekday_profile, dict):
+        return "• 曜日: データ不足"
     parts: List[str] = []
     for weekday in DOW_ORDER:
         if weekday not in weekday_profile:
             continue
         profile = weekday_profile[weekday]
+        if not isinstance(profile, dict):
+            continue
         parts.append(
-            f"{_weekday_label(weekday)} 単{profile['single']} 女{profile['female']} ({profile['ratio']})"
+            f"{_weekday_label(weekday)} 単{_safe_display_text(profile.get('single'), max_length=80)} "
+            f"女{_safe_display_text(profile.get('female'), max_length=80)} "
+            f"({_safe_display_text(profile.get('ratio'), max_length=80)})"
         )
     return "• 曜日: " + (" / ".join(parts) if parts else "データ不足")
 
 
 def _coverage_line(current: CoverageWindow, previous: CoverageWindow) -> str:
+    def count(window: Any, name: str) -> int:
+        try:
+            return max(0, int(getattr(window, name)))
+        except (TypeError, ValueError):
+            return 0
+
     return (
         "• カバレッジ: "
-        f"current raw {current.raw_days}/{current.target_days}, "
-        f"masked {current.masked_days}, missing {current.missing_days}; "
-        f"previous raw {previous.raw_days}/{previous.target_days}, "
-        f"masked {previous.masked_days}, missing {previous.missing_days}"
+        f"current raw {count(current, 'raw_days')}/{count(current, 'target_days')}, "
+        f"masked {count(current, 'masked_days')}, missing {count(current, 'missing_days')}; "
+        f"previous raw {count(previous, 'raw_days')}/{count(previous, 'target_days')}, "
+        f"masked {count(previous, 'masked_days')}, missing {count(previous, 'missing_days')}"
     )
 
 
@@ -590,21 +657,29 @@ def build_slack_payload(
     *,
     logical_today: Optional[date] = None,
 ) -> Tuple[Dict[str, Any], str, List[Tuple[str, List[str]]]]:
+    full_title = title if title.startswith("Cheekschecker") else f"Cheekschecker {title}"
+    current_records = _summary_records(context.current)
+    if not current_records:
+        return build_placeholder_summary_payload(
+            full_title,
+            "No data for this period / 集計対象なし",
+        )
     logical_ref = logical_today or context.period_end
-    today_entry = next((record for record in context.current if record.business_day == logical_ref), None)
-    latest = today_entry or max(context.current, key=lambda record: record.business_day)
+    today_entry = next((record for record in current_records if record.business_day == logical_ref), None)
+    latest = today_entry or max(current_records, key=lambda record: record.business_day)
     latest_lines = _format_latest_field(latest)
     stats_lines = _format_representation_field(context.stats)
-    top_lines = _format_top_days_section(context.top_days)
+    top_records = _summary_records(context.top_days) or _calc_top_days(current_records)
+    top_lines = _format_top_days_section(top_records)
+    trend = context.trend if isinstance(context.trend, dict) else {}
     trend_line = (
         "• 傾向: "
-        f"単女{_format_trend_value(context.trend['single'])} / "
-        f"女{_format_trend_value(context.trend['female'])} / "
-        f"比率{_format_trend_value(context.trend['ratio'])}"
+        f"単女{_format_trend_value(trend.get('single', 'unknown'))} / "
+        f"女{_format_trend_value(trend.get('female', 'unknown'))} / "
+        f"比率{_format_trend_value(trend.get('ratio', 'unknown'))}"
     )
     weekday_line = _format_weekday_profile_line(context.weekday_profile)
     coverage_line = _coverage_line(context.coverage_current, context.coverage_previous)
-    full_title = title if title.startswith("Cheekschecker") else f"Cheekschecker {title}"
     context_elements = [
         {"type": "mrkdwn", "text": f"対象期間: {_format_date_range(context.period_start, context.period_end)}"},
         {"type": "mrkdwn", "text": "mode: public-safe approximation"},
@@ -660,6 +735,8 @@ def build_placeholder_summary_payload(
     title: str,
     message: str,
 ) -> Tuple[Dict[str, Any], str, List[Tuple[str, List[str]]]]:
+    title = _safe_display_text(title, fallback="Cheekschecker Summary", max_length=150)
+    message = _safe_display_text(message, fallback="No data for this period / 集計対象なし")
     fallback = f"{title} {message}".strip()
     sections = [
         ("最新観測", ["該当なし"]),
@@ -692,16 +769,21 @@ def build_masked_summary(
     context: Optional[SummaryContext],
     *,
     history_meta: Dict[str, Any],
+    status: str = "no-data",
 ) -> Dict[str, Any]:
+    if not isinstance(history_meta, dict):
+        history_meta = {}
     payload: Dict[str, Any] = {
         "generated_at": datetime.now(tz=JST).isoformat(),
         "mask_level": history_meta.get("mask_level", 1),
         "mode": "public-safe",
     }
     if context is None:
+        if status not in {"no-data", "source-unavailable"}:
+            status = "no-data"
         payload.update(
             {
-                "status": "no-data",
+                "status": status,
                 "coverage": {
                     "current": {
                         "target_days": 0,

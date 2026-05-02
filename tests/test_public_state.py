@@ -75,6 +75,30 @@ def test_save_monitor_state_strips_raw_counts(tmp_path: Path) -> None:
     }
 
 
+def test_monitor_state_drops_invalid_day_keys(tmp_path: Path) -> None:
+    path = tmp_path / "monitor_state.json"
+    public_state.save_monitor_state(
+        {
+            "days": {
+                "2024-01-15": {"met": True, "stage": "initial", "last_notified_at": 55},
+                "2024-99-99": {"met": True, "stage": "bonus", "last_notified_at": 56},
+                "not-a-date": {"met": True, "stage": "bonus", "last_notified_at": 57},
+            }
+        },
+        path=path,
+    )
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert list(saved["days"]) == ["2024-01-15"]
+    loaded = public_state.load_monitor_state(
+        reference_date=date(2024, 1, 20),
+        legacy_day_resolver=_legacy_resolver,
+        path=path,
+        legacy_path=tmp_path / "state.json",
+    )
+    assert list(loaded["days"]) == ["2024-01-15"]
+
+
 def test_save_monitor_state_sanitizes_warning_throttle(tmp_path: Path) -> None:
     path = tmp_path / "monitor_state.json"
     public_state.save_monitor_state(
@@ -212,13 +236,21 @@ def test_summary_store_sanitizer_keeps_public_safe_shape(tmp_path: Path) -> None
                 },
                 "raw_counts": {"female": 6},
             },
+            "monthly": {
+                "generated_at": "2024-01-15T10:00:00+09:00",
+                "mask_level": 1,
+                "mode": "public-safe",
+                "status": "source-unavailable",
+                "coverage": {},
+            },
             "debug": {"raw": True},
         },
     )
 
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert list(saved) == ["weekly"]
+    assert set(saved) == {"weekly", "monthly"}
     assert "raw_counts" not in saved["weekly"]
     assert "raw" not in saved["weekly"]["stats"]
     assert len(saved["weekly"]["top_days"]) == 1
     assert "exact_ratio" not in saved["weekly"]["top_days"][0]
+    assert saved["monthly"]["status"] == "source-unavailable"

@@ -46,13 +46,25 @@ def append_step_summary(title: str, sections: Sequence[Tuple[str, Sequence[str]]
     )
 
 
-def send_slack_message(webhook: str, payload: Dict[str, Any], fallback_text: str) -> None:
-    _send_slack_message(webhook, payload, fallback_text, logger=LOGGER)
+def send_slack_message(
+    webhook: str,
+    payload: Dict[str, Any],
+    fallback_text: str,
+    *,
+    strict: bool = False,
+) -> None:
+    _send_slack_message(
+        webhook,
+        payload,
+        fallback_text,
+        logger=LOGGER,
+        raise_on_failure=strict,
+    )
 
 
-def send_simple_message(webhook: str, message: str, title: str) -> None:
+def send_simple_message(webhook: str, message: str, title: str, *, strict: bool = False) -> None:
     payload, fallback = build_simple_slack_payload(message, title)
-    send_slack_message(webhook, payload, fallback)
+    send_slack_message(webhook, payload, fallback, strict=strict)
 
 
 def handle_no_data(period_title: str, webhook: str, summary_title: str) -> None:
@@ -98,6 +110,13 @@ def run_summary(args: argparse.Namespace) -> int:
             "Skipping summary generation because source was unavailable: %s",
             dataset.fetch_error or dataset.fetch_status,
         )
+        store = load_summary_store(args.output)
+        store[args.period] = build_masked_summary(
+            None,
+            history_meta=history_meta,
+            status="source-unavailable",
+        )
+        save_summary_store(args.output, store)
         handle_source_unavailable(
             period_title,
             webhook,
@@ -135,7 +154,7 @@ def run_summary(args: argparse.Namespace) -> int:
 
 def run_ping(args: argparse.Namespace) -> int:
     webhook = args.slack_webhook
-    send_simple_message(webhook, "Webhook OK", "Cheekschecker: Webhook OK")
+    send_simple_message(webhook, "Webhook OK", "Cheekschecker: Webhook OK", strict=True)
     return 0
 
 

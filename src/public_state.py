@@ -26,7 +26,7 @@ DATE_KEY_RE = re.compile(DATE_KEY_PATTERN)
 VALID_STAGES = {"none", "initial", "bonus"}
 MASK_ENTRY_KEYS = ("single", "female", "total", "ratio")
 SUMMARY_PERIOD_KEYS = {"weekly", "monthly"}
-SUMMARY_STATUS_VALUES = {"ok", "no-data"}
+SUMMARY_STATUS_VALUES = {"ok", "no-data", "source-unavailable"}
 SUMMARY_TREND_VALUES = {"up", "down", "flat", "unknown"}
 SUMMARY_SOURCE_VALUES = {"raw", "masked"}
 SUMMARY_METRIC_KEYS = ("single", "female", "total", "ratio")
@@ -322,7 +322,7 @@ def _sanitize_summary_payload(value: Any) -> Optional[Dict[str, Any]]:
         "status": "no-data",
     }
 
-    status = _safe_text(value.get("status"), max_length=16)
+    status = _safe_text(value.get("status"), max_length=32)
     if status in SUMMARY_STATUS_VALUES:
         payload["status"] = status
 
@@ -451,9 +451,7 @@ def load_monitor_state(
     normalized_days: Dict[str, Any] = {}
     if isinstance(days, dict):
         for key, value in days.items():
-            if not isinstance(key, str):
-                continue
-            if len(key) != 10 or key[4] != "-" or key[7] != "-":
+            if not _is_iso_date_key(key):
                 continue
             entry = _normalize_day_entry(value)
             if entry is None:
@@ -482,7 +480,7 @@ def save_monitor_state(state: Dict[str, Any], *, path: Path = MONITOR_STATE_PATH
     days = state.get("days")
     if isinstance(days, dict):
         for key, value in days.items():
-            if not isinstance(key, str):
+            if not _is_iso_date_key(key):
                 continue
             entry = _normalize_day_entry(value)
             if entry is None:

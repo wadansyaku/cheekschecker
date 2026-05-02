@@ -17,13 +17,14 @@
 - upstream の一時的な接続失敗は scheduled run では warning skip として扱い、job failure にはしません。manual dispatch は fail-fast のまま維持します。
 - ETag / Last-Modified が同一でも `last_fetched_at` が古い、または未記録の場合は再取得します。`HEAD_SKIP_MAX_AGE_MINUTES=0` で HEAD skip を無効化できます。
 - scheduled monitor の fetch failure Slack warning は `WARNING_THROTTLE_MINUTES` で抑制します。初回と throttle 経過後だけ Slack に出し、抑制中も GitHub Step Summary と `monitor_state.json.warning_throttle` で観測可能にします。
+- monitor の Slack payload は実通知として詳細を保持しますが、GitHub Step Summary は public-safe band 表現に丸め、raw counts を公開面へ残しません。
 
 ## Public-safe summary
 - `watch_cheeks.py summary` は raw dataset を採取しつつ、public-safe な履歴更新を行う収集フェーズです。
 - `summarize.py` は `current run` の raw dataset と `history_masked.json` を入力として、public-safe approximation の summary を生成します。
 - Slack summary payload は `src/public_summary.py` で組み立てます。`watch_cheeks.py` 側の旧 exact summary payload 経路は持ちません。
 - 長期の exact reconstruction は行いません。過去日の評価は masked bands を元にした近似です。
-- `summary_masked.json` は `weekly` / `monthly` キーを維持しつつ、`mode: "public-safe"` と `coverage` metadata を持ちます。
+- `summary_masked.json` は `weekly` / `monthly` キーを維持しつつ、`mode: "public-safe"`、`status`、`coverage` metadata を持ちます。取得元が利用できない run は stale な `ok` を残さず `source-unavailable` に更新します。
 
 ## Domain and parser modules
 - `src/domain.py` は `DailyEntry`、JST、曜日定義の共有型を持ちます。
@@ -39,4 +40,4 @@
 - manual dispatch の短期診断 artifact は `sanitized-table`、`masked-history`、`monitor-state`、`weekly-summary-raw`、`monthly-summary-raw` のみです。いずれも `workflow_dispatch` 限定、`retention-days: 3` です。
 - summary raw dataset artifact は exact 値を含むため、scheduled run ではアップロードしません。manual dispatch の短期診断 artifact としてのみ保持します。
 - workflow 契約は `scripts/ci/check_workflows.py` で検査し、retry timeout、writer concurrency、push failure 無視禁止、manual artifact の条件・保持期間、`ALLOW_FETCH_FAILURE` の schedule/manual 分岐、writer commit 対象、`TZ=Asia/Tokyo`、`ROBOTS_ENFORCE=1`、monitor の `WARNING_THROTTLE_MINUTES=180` を固定します。
-- Slack 送信と GitHub Step Summary 追記は `src/notifications.py` の共通 helper を使います。monitor は fallback 再送なし、summary CLI は fallback text 再送ありに分けます。
+- Slack 送信と GitHub Step Summary 追記は `src/notifications.py` の共通 helper を使います。monitor は fallback 再送なし、summary CLI は fallback text 再送ありに分けます。summary の manual `--ping-only` は strict 送信で、Webhook 未設定や送信失敗を成功扱いにしません。

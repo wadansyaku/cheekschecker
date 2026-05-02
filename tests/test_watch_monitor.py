@@ -196,6 +196,158 @@ def test_monitor_fetch_failure_warning_is_throttled(monkeypatch: pytest.MonkeyPa
     assert throttle_state["suppressed_runs"] == 1
 
 
+def test_fetch_failure_payload_omits_invalid_action_url() -> None:
+    payload, fallback, sections = watch_cheeks._build_fetch_failure_payload(
+        title="Cheekschecker Monitor",
+        message="外部サイト取得失敗",
+        detail="connect timeout",
+        target_url="not-a-url",
+    )
+
+    assert "外部サイト取得失敗" in fallback
+    assert sections[0][0] == "実行結果"
+    assert all(block["type"] != "actions" for block in payload["blocks"])
+
+
+def test_process_notifications_recovers_from_malformed_days_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = {"notify": [], "summary": [], "saved": []}
+    logical_today = datetime.fromisoformat("2024-01-10T12:00:00+09:00").date()
+    entry = watch_cheeks.DailyEntry(
+        raw_date=logical_today,
+        business_day=logical_today,
+        day_of_month=logical_today.day,
+        dow_en="Wed",
+        male=3,
+        female=6,
+        single_female=4,
+        total=9,
+        ratio=0.667,
+        considered=True,
+        meets=True,
+        required_single=3,
+    )
+
+    monkeypatch.setattr("watch_cheeks.save_state", lambda state: events["saved"].append(state))
+    monkeypatch.setattr(
+        "watch_cheeks.append_step_summary",
+        lambda title, sections, fallback: events["summary"].append((title, sections, fallback)),
+    )
+    monkeypatch.setattr(
+        "watch_cheeks.notify_slack",
+        lambda payload, settings: events["notify"].append(payload),
+    )
+
+    result = watch_cheeks.process_notifications(
+        [entry],
+        settings=make_settings(),
+        logical_today=logical_today,
+        state={"days": ["stale", "shape"]},
+    )
+
+    saved_entry = result["days"][logical_today.isoformat()]
+    assert saved_entry["stage"] == "initial"
+    assert saved_entry["met"] is True
+    assert len(events["notify"]) == 1
+
+
+def test_process_notifications_step_summary_uses_public_safe_bands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = {"notify": [], "summary": [], "saved": []}
+    logical_today = datetime.fromisoformat("2024-01-10T12:00:00+09:00").date()
+    entry = watch_cheeks.DailyEntry(
+        raw_date=logical_today,
+        business_day=logical_today,
+        day_of_month=logical_today.day,
+        dow_en="Wed",
+        male=3,
+        female=6,
+        single_female=4,
+        total=9,
+        ratio=0.667,
+        considered=True,
+        meets=True,
+        required_single=3,
+    )
+
+    monkeypatch.setattr("watch_cheeks.save_state", lambda state: events["saved"].append(state))
+    monkeypatch.setattr(
+        "watch_cheeks.append_step_summary",
+        lambda title, sections, fallback: events["summary"].append((title, sections, fallback)),
+    )
+    monkeypatch.setattr(
+        "watch_cheeks.notify_slack",
+        lambda payload, settings: events["notify"].append(payload),
+    )
+
+    watch_cheeks.process_notifications(
+        [entry],
+        settings=make_settings(),
+        logical_today=logical_today,
+        state={"days": {}},
+    )
+
+    summary_text = json.dumps(events["summary"], ensure_ascii=False)
+    assert "単女3-4" in summary_text
+    assert "女5-6" in summary_text
+    assert "全<10" in summary_text
+    assert "単女4 女6" not in summary_text
+    assert "/全9" not in summary_text
+    assert "単女4 女6" in events["notify"][0]["text"]
+
+
+def test_process_notifications_recovers_from_unknown_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = {"notify": [], "summary": [], "saved": []}
+    logical_today = datetime.fromisoformat("2024-01-10T12:00:00+09:00").date()
+    entry = watch_cheeks.DailyEntry(
+        raw_date=logical_today,
+        business_day=logical_today,
+        day_of_month=logical_today.day,
+        dow_en="Wed",
+        male=3,
+        female=6,
+        single_female=4,
+        total=9,
+        ratio=0.667,
+        considered=True,
+        meets=True,
+        required_single=3,
+    )
+
+    monkeypatch.setattr("watch_cheeks.save_state", lambda state: events["saved"].append(state))
+    monkeypatch.setattr(
+        "watch_cheeks.append_step_summary",
+        lambda title, sections, fallback: events["summary"].append((title, sections, fallback)),
+    )
+    monkeypatch.setattr(
+        "watch_cheeks.notify_slack",
+        lambda payload, settings: events["notify"].append(payload),
+    )
+
+    result = watch_cheeks.process_notifications(
+        [entry],
+        settings=make_settings(),
+        logical_today=logical_today,
+        state={
+            "days": {
+                logical_today.isoformat(): {
+                    "met": True,
+                    "stage": "surprise",
+                    "last_notified_at": "not-a-timestamp",
+                }
+            }
+        },
+    )
+
+    saved_entry = result["days"][logical_today.isoformat()]
+    assert saved_entry["stage"] == "initial"
+    assert "初回" in events["notify"][0]["text"]
+
+
 def test_monitor_slack_diagnostic_sends_synthetic_payload_without_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

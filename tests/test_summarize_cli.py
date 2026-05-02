@@ -48,7 +48,30 @@ def test_run_summary_handles_source_unavailable(monkeypatch) -> None:
     )
 
     assert summarize.run_summary(args) == 0
-    assert events["saved"] == []
+    assert len(events["saved"]) == 1
+    assert events["saved"][0][1]["weekly"]["status"] == "source-unavailable"
     assert len(events["summary"]) == 1
     assert "外部サイト取得失敗" in events["summary"][0][2]
     assert len(events["slack"]) == 1
+
+
+def test_run_ping_requires_strict_slack_delivery(monkeypatch) -> None:
+    events = []
+    monkeypatch.setattr(
+        "summarize.send_simple_message",
+        lambda webhook, message, title, strict=False: events.append(
+            (webhook, message, title, strict)
+        ),
+    )
+
+    args = argparse.Namespace(slack_webhook="https://hooks.slack.test/services/example")
+
+    assert summarize.run_ping(args) == 0
+    assert events == [
+        (
+            "https://hooks.slack.test/services/example",
+            "Webhook OK",
+            "Cheekschecker: Webhook OK",
+            True,
+        )
+    ]

@@ -355,7 +355,7 @@ def _format_business_label(target: date, logical_today: date) -> str:
 def _format_stage_notification(entry: DailyEntry, notification_type: str, logical_today: date) -> str:
     percent = int(round(entry.ratio * 100))
     label_map = {"initial": "初回", "bonus": "追加"}
-    prefix = label_map.get(notification_type, notification_type)
+    prefix = label_map.get(notification_type, "状態更新")
     label = _format_business_label(entry.business_day, logical_today)
     return (
         f"[{prefix}] {label}: 単女{entry.single_female} 女{entry.female} "
@@ -396,6 +396,104 @@ def build_fallback_text(
             for entry in changed_counts
         )
     return "\n".join(lines) if lines else "該当なし"
+
+
+def _format_public_safe_entry(
+    entry: DailyEntry,
+    logical_today: date,
+    settings: Settings,
+    include_male: bool = False,
+) -> str:
+    masked = mask_entry(entry, settings.mask_level, settings.masking_config)
+    parts = [f"単女{masked['single']}", f"女{masked['female']}"]
+    if include_male:
+        parts.append("男非公開")
+    parts.append(f"全{masked['total']}")
+    label = _format_business_label(entry.business_day, logical_today)
+    return f"{label}: {' '.join(parts)} ({masked['ratio']})"
+
+
+def _format_public_safe_stage_notification(
+    entry: DailyEntry,
+    notification_type: str,
+    logical_today: date,
+    settings: Settings,
+) -> str:
+    label_map = {"initial": "初回", "bonus": "追加"}
+    prefix = label_map.get(notification_type, "状態更新")
+    entry_text = _format_public_safe_entry(entry, logical_today, settings)
+    return f"[{prefix}] {entry_text}"
+
+
+def build_public_safe_fallback_text(
+    stage_notifications: Sequence[Tuple[DailyEntry, str]],
+    newly_met: Sequence[DailyEntry],
+    changed_counts: Sequence[DailyEntry],
+    logical_today: date,
+    settings: Settings,
+) -> str:
+    lines: List[str] = []
+    if stage_notifications:
+        lines.append("【基準達成通知】")
+        lines.extend(
+            f"- {_format_public_safe_stage_notification(entry, action, logical_today, settings)}"
+            for entry, action in stage_notifications
+        )
+    if newly_met:
+        lines.append("【新規で条件を満たした日】")
+        lines.extend(
+            f"- {_format_public_safe_entry(entry, logical_today, settings)}"
+            for entry in newly_met
+        )
+    if changed_counts:
+        lines.append("【人数が更新された日】")
+        lines.extend(
+            f"- {_format_public_safe_entry(entry, logical_today, settings, include_male=True)}"
+            for entry in changed_counts
+        )
+    return "\n".join(lines) if lines else "該当なし"
+
+
+def _build_public_safe_notification_sections(
+    stage_notifications: List[Tuple[DailyEntry, str]],
+    newly_met: List[DailyEntry],
+    changed_counts: List[DailyEntry],
+    logical_today: date,
+    settings: Settings,
+) -> List[Tuple[str, List[str]]]:
+    sections: List[Tuple[str, List[str]]] = []
+
+    if stage_notifications:
+        sections.append(
+            (
+                "基準達成通知",
+                [
+                    _format_public_safe_stage_notification(entry, action, logical_today, settings)
+                    for entry, action in stage_notifications
+                ],
+            )
+        )
+
+    if newly_met:
+        sections.append(
+            (
+                "新規成立日",
+                [_format_public_safe_entry(entry, logical_today, settings) for entry in newly_met],
+            )
+        )
+
+    if changed_counts:
+        sections.append(
+            (
+                "人数更新",
+                [
+                    _format_public_safe_entry(entry, logical_today, settings, include_male=True)
+                    for entry in changed_counts
+                ],
+            )
+        )
+
+    return sections
 
 
 def _build_slack_blocks(
@@ -779,17 +877,19 @@ def _build_fetch_failure_payload(
     sections = [
         ("実行結果", [message, f"detail: {detail}"]),
     ]
-    payload = {
-        "text": fallback,
-        "blocks": [
-            {
-                "type": "header",
-                "text": {"type": "plain_text", "text": title, "emoji": False},
-            },
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*実行結果*\n{message}\n`{detail}`"},
-            },
+    blocks: List[Dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": title, "emoji": False},
+        },
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*実行結果*\n{message}\n`{detail}`"},
+        },
+    ]
+    parsed_url = urlparse(target_url)
+    if parsed_url.scheme in {"http", "https"} and parsed_url.netloc:
+        blocks.append(
             {
                 "type": "actions",
                 "elements": [
@@ -799,8 +899,11 @@ def _build_fetch_failure_payload(
                         "url": target_url,
                     }
                 ],
-            },
-        ],
+            }
+        )
+    payload = {
+        "text": fallback,
+        "blocks": blocks,
     }
     return payload, fallback, sections
 
@@ -954,6 +1057,12 @@ def _process_single_entry(
     return action, stage, last_notified, state_entry
 
 
+def _coerce_monitor_day_state(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
 def _categorize_notifications(
     entry: DailyEntry,
     action: Optional[str],
@@ -1017,7 +1126,11 @@ def process_notifications(
     """
     now_ts = int(time.time())
     state = state if state is not None else load_state(logical_today)
-    days_state = state.setdefault("days", {})
+    days_state = state.get("days")
+    if not isinstance(days_state, dict):
+        LOGGER.warning("Dropping malformed monitor days state: %s", type(days_state).__name__)
+        days_state = {}
+        state["days"] = days_state
 
     filtered = _filter_entries_for_notifications(
         entries,
@@ -1032,7 +1145,7 @@ def process_notifications(
 
     for entry in filtered:
         key = _date_key(entry.business_day)
-        prev_state = days_state.get(key, {})
+        prev_state = _coerce_monitor_day_state(days_state.get(key))
 
         action, stage, last_notified, state_entry = _process_single_entry(
             entry, prev_state, now_ts, settings
@@ -1051,13 +1164,24 @@ def process_notifications(
 
     save_state(state)
 
-    sections = _build_notification_sections(
-        stage_notifications, newly_met, changed_counts, logical_today
+    step_sections = _build_public_safe_notification_sections(
+        stage_notifications,
+        newly_met,
+        changed_counts,
+        logical_today,
+        settings,
+    )
+    step_fallback = build_public_safe_fallback_text(
+        stage_notifications,
+        newly_met,
+        changed_counts,
+        logical_today,
+        settings,
     )
     fallback = build_fallback_text(
         stage_notifications, newly_met, changed_counts, logical_today
     )
-    append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, fallback)
+    append_step_summary(STEP_SUMMARY_TITLE_MONITOR, step_sections, step_fallback)
 
     if not (stage_notifications or newly_met or changed_counts):
         LOGGER.info("No notifications to send for logical_today=%s", logical_today)
@@ -1112,18 +1236,23 @@ def send_monitor_slack_diagnostic(
     ]
     sections = [("診断", diagnostic_lines)]
     sections.extend(
-        _build_notification_sections(
+        _build_public_safe_notification_sections(
             stage_notifications,
             newly_met,
             changed_counts,
             logical_today,
+            settings,
         )
     )
-    fallback = "【診断】monitor Slack 通知分岐の疎通確認\n" + build_fallback_text(
+    step_fallback = "【診断】monitor Slack 通知分岐の疎通確認\n" + build_public_safe_fallback_text(
         stage_notifications,
         newly_met,
         changed_counts,
         logical_today,
+        settings,
+    )
+    fallback = "【診断】monitor Slack 通知分岐の疎通確認\n" + build_fallback_text(
+        stage_notifications, newly_met, changed_counts, logical_today
     )
     blocks = [
         {
@@ -1145,7 +1274,7 @@ def send_monitor_slack_diagnostic(
     )
     payload = {"text": fallback, "blocks": blocks}
 
-    append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, fallback)
+    append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, step_fallback)
     notify_slack(payload, settings, strict=True)
     LOGGER.info("Monitor Slack diagnostic notification sent")
 
@@ -1402,12 +1531,43 @@ def summary(
     raw_output: Optional[Path] = None,
     notify: bool = True,
 ) -> None:
-    if not check_robots_allow(settings):
-        LOGGER.warning("Summary skipped due to robots.txt policy")
-        return
-
     now = datetime.now(tz=JST)
     logical_today = derive_business_day(now, settings.rollover_hours)
+
+    if not check_robots_allow(settings):
+        LOGGER.warning("Summary skipped due to robots.txt policy")
+        detail = "robots.txt disallowed target"
+        if raw_output:
+            raw_output.parent.mkdir(parents=True, exist_ok=True)
+            raw_output.write_text(
+                json.dumps(
+                    _build_summary_fetch_failure_raw_payload(
+                        days=days,
+                        logical_today=logical_today,
+                        error_message=detail,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            LOGGER.warning(
+                "Summary source unavailable; wrote robots failure marker to %s",
+                raw_output,
+            )
+        if notify:
+            summary_title = STEP_SUMMARY_TITLES.get(days, f"Cheeks Summary {days}")
+            header_title = "週次サマリー" if days == 7 else "月次サマリー"
+            payload, fallback_text, sections = _build_fetch_failure_payload(
+                title=f"Cheekschecker {header_title}",
+                message="robots.txtにより今回の summary はスキップしました",
+                detail=detail,
+                target_url=settings.target_url,
+            )
+            append_step_summary(summary_title, sections, fallback_text)
+            notify_slack(payload, settings)
+        return
+
     try:
         html, _ = asyncio.run(fetch_calendar_html(settings))
     except CalendarFetchError as exc:
@@ -1464,12 +1624,16 @@ def summary(
     dataset = public_summary.raw_dataset_from_dict(raw_payload)
     history_meta = load_masked_history()
     period_key = "weekly" if days == 7 else "monthly"
-    context = public_summary.build_summary_context(
-        period_key,
-        dataset,
-        history_meta,
-        masking_config=settings.masking_config,
-    )
+    try:
+        context = public_summary.build_summary_context(
+            period_key,
+            dataset,
+            history_meta,
+            masking_config=settings.masking_config,
+        )
+    except Exception as exc:  # pragma: no cover - guard against malformed local artifacts
+        LOGGER.exception("Failed to build public-safe summary context: %s", exc)
+        context = None
     summary_title = STEP_SUMMARY_TITLES.get(days, f"Cheeks Summary {days}")
     header_title = "週次サマリー" if days == 7 else "月次サマリー"
 
@@ -1479,11 +1643,18 @@ def summary(
             "No data for this period / 集計対象なし",
         )
     else:
-        payload, fallback_text, sections = public_summary.build_slack_payload(
-            context,
-            header_title,
-            logical_today=logical_today,
-        )
+        try:
+            payload, fallback_text, sections = public_summary.build_slack_payload(
+                context,
+                header_title,
+                logical_today=logical_today,
+            )
+        except Exception as exc:  # pragma: no cover - guard against unexpected summary shape
+            LOGGER.exception("Failed to build public-safe summary Slack payload: %s", exc)
+            payload, fallback_text, sections = public_summary.build_placeholder_summary_payload(
+                f"Cheekschecker {header_title}",
+                "public-safe summary could not be built / 集計対象なし",
+            )
 
     append_step_summary(summary_title, sections, fallback_text)
     notify_slack(payload, settings)
