@@ -1,4 +1,5 @@
 import sys
+import json
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -60,6 +61,67 @@ def make_entry(single, female, *, business_day=date(2024, 1, 10)):
         meets=True,
         required_single=3,
     )
+
+
+def test_process_notifications_mentions_channel_for_stage_notifications(monkeypatch, tmp_path):
+    captured = []
+
+    def fake_notify(payload, settings, **kwargs):
+        captured.append(payload)
+
+    monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", tmp_path / "monitor_state.json")
+    monkeypatch.setattr("watch_cheeks.notify_slack", fake_notify)
+    monkeypatch.setattr("watch_cheeks.time", type("T", (), {"time": staticmethod(lambda: 2000)}))
+
+    process_notifications(
+        [make_entry(3, 4)],
+        settings=make_settings(ping_channel=True),
+        logical_today=date(2024, 1, 10),
+    )
+
+    rendered = json.dumps(captured[0], ensure_ascii=False)
+    assert rendered.count("<!channel>") == 1
+    assert "基準達成通知" in rendered
+
+
+def test_process_notifications_does_not_mention_channel_for_count_update_only(
+    monkeypatch,
+    tmp_path,
+):
+    captured = []
+    logical_today = date(2024, 1, 10)
+
+    def fake_notify(payload, settings, **kwargs):
+        captured.append(payload)
+
+    monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", tmp_path / "monitor_state.json")
+    monkeypatch.setattr("watch_cheeks.notify_slack", fake_notify)
+    monkeypatch.setattr("watch_cheeks.time", type("T", (), {"time": staticmethod(lambda: 2010)}))
+
+    process_notifications(
+        [make_entry(4, 6, business_day=logical_today)],
+        settings=make_settings(ping_channel=True, notify_mode="changed"),
+        logical_today=logical_today,
+        state={
+            "days": {
+                logical_today.isoformat(): {
+                    "met": True,
+                    "stage": "bonus",
+                    "last_notified_at": 2000,
+                    "counts": {
+                        "female": 4,
+                        "single_female": 3,
+                        "total": 4,
+                    },
+                }
+            }
+        },
+    )
+
+    rendered = json.dumps(captured[0], ensure_ascii=False)
+    assert "人数更新" in rendered
+    assert "<!channel>" not in rendered
+    assert "@channel" not in rendered
 
 
 def test_evaluate_stage_transition_flow():
@@ -133,7 +195,7 @@ def test_evaluate_stage_transition_flow():
 def test_process_notifications_filters_past(monkeypatch, tmp_path):
     captured = []
 
-    def fake_notify(payload, settings):
+    def fake_notify(payload, settings, **kwargs):
         captured.append(payload)
 
     monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", tmp_path / "monitor_state.json")
@@ -159,7 +221,7 @@ def test_process_notifications_filters_past(monkeypatch, tmp_path):
 def test_process_notifications_limits_to_today_and_tomorrow(monkeypatch, tmp_path):
     captured = []
 
-    def fake_notify(payload, settings):
+    def fake_notify(payload, settings, **kwargs):
         captured.append(payload)
 
     monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", tmp_path / "monitor_state.json")

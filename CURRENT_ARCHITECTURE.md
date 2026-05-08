@@ -16,8 +16,9 @@
 - `monitor` は `monitor_state.json` と `history_masked.json` を更新し、同一 writer transaction で commit / push します。
 - upstream の一時的な接続失敗は scheduled run では warning skip として扱い、job failure にはしません。manual dispatch は fail-fast のまま維持します。
 - ETag / Last-Modified が同一でも `last_fetched_at` が古い、または未記録の場合は再取得します。`HEAD_SKIP_MAX_AGE_MINUTES=0` で HEAD skip を無効化できます。
-- scheduled monitor の fetch failure Slack warning は `WARNING_THROTTLE_MINUTES` で抑制します。初回と throttle 経過後だけ Slack に出し、抑制中も GitHub Step Summary と `monitor_state.json.warning_throttle` で観測可能にします。
+- scheduled monitor の fetch failure Slack warning は raw exception を繰り返さず、原因カテゴリ、連続失敗回数、前回成功、抑制回数、詳細リンクを主情報にします。`WARNING_THROTTLE_MINUTES` により初回と throttle 経過後だけ Slack に出し、抑制中も GitHub Step Summary と `monitor_state.json.warning_throttle` で観測可能にします。
 - monitor の Slack payload は実通知として詳細を保持しますが、GitHub Step Summary は public-safe band 表現に丸め、raw counts を公開面へ残しません。
+- Slack の `@channel` は基準達成の stage notification に限定します。人数更新、fetch warning、diagnostic payload はチャンネルメンションを含めません。
 
 ## Public-safe summary
 - `watch_cheeks.py summary` は raw dataset を採取しつつ、public-safe な履歴更新を行う収集フェーズです。
@@ -41,3 +42,6 @@
 - summary raw dataset artifact は exact 値を含むため、scheduled run ではアップロードしません。manual dispatch の短期診断 artifact としてのみ保持します。
 - workflow 契約は `scripts/ci/check_workflows.py` で検査し、retry timeout、writer concurrency、push failure 無視禁止、manual artifact の条件・保持期間、`ALLOW_FETCH_FAILURE` の schedule/manual 分岐、writer commit 対象、`TZ=Asia/Tokyo`、`ROBOTS_ENFORCE=1`、monitor の `WARNING_THROTTLE_MINUTES=180` を固定します。
 - Slack 送信と GitHub Step Summary 追記は `src/notifications.py` の共通 helper を使います。monitor は fallback 再送なし、summary CLI は fallback text 再送ありに分けます。summary の manual `--ping-only` は strict 送信で、Webhook 未設定や送信失敗を成功扱いにしません。
+- workflow failure 通知は writer state とは別経路ですが、`scripts/ci/build_slack_failure_payload.py` で payload を生成し、workflow 内 inline Python / inline JSON に戻さない契約にします。failure notification job は `contents: read`、`timeout-minutes: 3`、対象 job への `needs`、`if: failure()`、Slack post 失敗時 fail-fast を必須とします。
+- `monitor.yml` の `send_monitor_diagnostic=true` は diagnostic-only です。通常 monitor、manual artifact upload、public-safe commit は同じ workflow_dispatch 内で走らせず、実予約データではない synthetic Slack payload の疎通だけを検証します。実予約通知と誤読されないよう、diagnostic ではメンションを強制無効化します。
+- quality gate は `scripts/ci/check_workflows.py`、`scripts/ci/check_public_artifacts.py`、`mypy`、source-only coverage 付き pytest で構成します。coverage 対象に tests を混ぜず、tracked public artifact に raw key や secret-looking text が戻る退行を local / CI の両方で検出します。

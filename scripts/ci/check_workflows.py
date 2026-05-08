@@ -5,6 +5,10 @@ from pathlib import Path
 import sys
 
 
+SLACK_FAILURE_PAYLOAD_FILE = "slack_failure_payload.json"
+SLACK_FAILURE_PAYLOAD_SCRIPT_DIR = "scripts/ci/"
+SLACK_FAILURE_PAYLOAD_SCRIPT_KEYWORDS = ("failure", "payload")
+
 BIDI_RANGES = (
     (0x202A, 0x202E),
     (0x2066, 0x2069),
@@ -22,6 +26,12 @@ MANUAL_DIAGNOSTIC_ARTIFACTS = {
     "summary_monthly.yml": {
         "monthly-summary-raw": "monthly_summary_raw.json",
     },
+}
+
+WORKFLOW_NOTIFY_FAILURE_NEEDS = {
+    "monitor.yml": "monitor",
+    "summary_weekly.yml": "summary",
+    "summary_monthly.yml": "summary",
 }
 
 WRITER_COMMIT_TARGETS = {
@@ -200,6 +210,34 @@ def _block_contains(block: list[str], needle: str) -> bool:
     return any(needle in line for line in block)
 
 
+def _shell_command_from_line(block: list[str], index: int) -> str:
+    command_lines = [block[index].strip()]
+    next_index = index + 1
+    while command_lines[-1].endswith("\\") and next_index < len(block):
+        command_lines[-1] = command_lines[-1].rstrip("\\").rstrip()
+        command_lines.append(block[next_index].strip())
+        next_index += 1
+    return " ".join(command_lines)
+
+
+def _has_dedicated_slack_failure_payload_script(block: list[str]) -> bool:
+    for index, line in enumerate(block):
+        command = _shell_command_from_line(block, index)
+        if not command.startswith(("python ", "python3 ")):
+            continue
+        if SLACK_FAILURE_PAYLOAD_SCRIPT_DIR not in command:
+            continue
+        if ".py" not in command:
+            continue
+        command_lower = command.lower()
+        if not all(keyword in command_lower for keyword in SLACK_FAILURE_PAYLOAD_SCRIPT_KEYWORDS):
+            continue
+        if SLACK_FAILURE_PAYLOAD_FILE not in command:
+            continue
+        return True
+    return False
+
+
 def _validate_manual_artifact_contract(
     path: Path,
     blocks: list[tuple[int, list[str]]],
@@ -213,7 +251,12 @@ def _validate_manual_artifact_contract(
             continue
 
         start, block = found
-        if not _step_has_line(block, "if: github.event_name == 'workflow_dispatch'"):
+        expected_if = "if: github.event_name == 'workflow_dispatch'"
+        if path.name == "monitor.yml":
+            expected_if = (
+                "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+            )
+        if not _step_has_line(block, expected_if):
             errors.append(
                 f"{path}:{start} artifact {artifact_name} must be workflow_dispatch-only"
             )
@@ -226,6 +269,44 @@ def _validate_manual_artifact_contract(
     return errors
 
 
+def _validate_monitor_diagnostic_only_contract(
+    path: Path,
+    blocks: list[tuple[int, list[str]]],
+) -> list[str]:
+    if path.name != "monitor.yml":
+        return []
+
+    guarded_steps = {
+        "Run monitor with sanitized artifact": (
+            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+        ),
+        "Upload sanitized table": (
+            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+        ),
+        "Upload masked history snapshot": (
+            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+        ),
+        "Upload monitor state snapshot": (
+            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+        ),
+        "Commit public-safe monitor artifacts": (
+            "if: github.event_name != 'workflow_dispatch' || !inputs.send_monitor_diagnostic"
+        ),
+    }
+    errors: list[str] = []
+    for step_name, expected_if in guarded_steps.items():
+        found = _find_step_block(blocks, step_name)
+        if found is None:
+            errors.append(f"{path} monitor workflow must include step {step_name}")
+            continue
+        start, block = found
+        if not _step_has_line(block, expected_if):
+            errors.append(
+                f"{path}:{start} {step_name} must be skipped when send_monitor_diagnostic is true"
+            )
+    return errors
+
+
 def _validate_allow_fetch_failure_contract(
     path: Path,
     blocks: list[tuple[int, list[str]]],
@@ -234,11 +315,14 @@ def _validate_allow_fetch_failure_contract(
     if path.name == "monitor.yml":
         scheduled = _find_step_block(blocks, "Run monitor (scheduled)")
         manual = _find_step_block(blocks, "Run monitor with sanitized artifact")
+        expected_manual_if = (
+            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+        )
         if scheduled is None or not _step_has_line(scheduled[1], "if: github.event_name == 'schedule'"):
             errors.append(f"{path} scheduled monitor must be gated to github.event_name == 'schedule'")
         if scheduled is None or not _step_has_line(scheduled[1], "ALLOW_FETCH_FAILURE: '1'"):
             errors.append(f"{path} scheduled monitor must set ALLOW_FETCH_FAILURE: '1'")
-        if manual is None or not _step_has_line(manual[1], "if: github.event_name == 'workflow_dispatch'"):
+        if manual is None or not _step_has_line(manual[1], expected_manual_if):
             errors.append(f"{path} manual monitor must be gated to workflow_dispatch")
         if manual is None or not _step_has_line(manual[1], "ALLOW_FETCH_FAILURE: '0'"):
             errors.append(f"{path} manual monitor must set ALLOW_FETCH_FAILURE: '0'")
@@ -286,6 +370,8 @@ def _validate_monitor_slack_diagnostic_contract(
         errors.append(f"{path}:{start} monitor Slack diagnostic must be manual-input gated")
     if not _step_has_line(block, "SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}"):
         errors.append(f"{path}:{start} monitor Slack diagnostic must use SLACK_WEBHOOK_URL secret")
+    if not _step_has_line(block, "PING_CHANNEL: '0'"):
+        errors.append(f"{path}:{start} monitor Slack diagnostic must disable channel mentions")
     if not _step_has_line(block, "run: python watch_cheeks.py monitor-diagnostic"):
         errors.append(f"{path}:{start} monitor Slack diagnostic must run monitor-diagnostic")
     return errors
@@ -350,11 +436,22 @@ def _validate_notify_failure_contract(
     text: str,
     blocks: list[tuple[int, list[str]]],
 ) -> list[str]:
+    expected_need = WORKFLOW_NOTIFY_FAILURE_NEEDS.get(path.name)
     if "notify-failure:" not in text:
+        if expected_need is not None:
+            return [f"{path} writer workflow must include notify-failure job"]
         return []
 
     notify_failure_section = text.split("notify-failure:", 1)[1]
+    notify_failure_lines = notify_failure_section.splitlines()
     errors: list[str] = []
+    if expected_need is not None:
+        if f"needs: {expected_need}" not in notify_failure_section:
+            errors.append(f"{path} notify-failure job must need {expected_need}")
+        if "if: failure()" not in notify_failure_section:
+            errors.append(f"{path} notify-failure job must run on failure()")
+        if not any(line.strip() == "timeout-minutes: 3" for line in notify_failure_lines):
+            errors.append(f"{path} notify-failure job must set timeout-minutes: 3")
     if "contents: write" in notify_failure_section:
         errors.append(f"{path} notify-failure job must not request contents: write")
 
@@ -368,31 +465,32 @@ def _validate_notify_failure_contract(
         errors.append(f"{path}:{start} notify-failure must use SLACK_WEBHOOK_URL secret")
     if not _block_contains(block, 'if [ -z "$SLACK_WEBHOOK_URL" ]; then'):
         errors.append(f"{path}:{start} notify-failure must skip cleanly when Slack webhook is unset")
-    if not _block_contains(block, 'curl --fail-with-body --show-error --silent -X POST "$SLACK_WEBHOOK_URL"'):
+    if not _block_contains(block, 'curl --fail-with-body --show-error --silent --max-time 10 -X POST "$SLACK_WEBHOOK_URL"'):
         errors.append(f"{path}:{start} notify-failure curl must fail on Slack HTTP errors")
-    if not _block_contains(block, "json.dumps(payload, ensure_ascii=False)"):
-        errors.append(f"{path}:{start} notify-failure must JSON-encode the Slack payload")
-    if not _block_contains(block, "--data-binary @slack_failure_payload.json"):
+    if not _has_dedicated_slack_failure_payload_script(block):
+        errors.append(
+            f"{path}:{start} notify-failure must generate {SLACK_FAILURE_PAYLOAD_FILE} "
+            "with a dedicated Slack failure payload script"
+        )
+    if not _block_contains(block, f"--data-binary @{SLACK_FAILURE_PAYLOAD_FILE}"):
         errors.append(f"{path}:{start} notify-failure must post a generated Slack payload file")
     block_text = "\n".join(block)
+    if "python - <<'PY'" in block_text or "python - <<PY" in block_text:
+        errors.append(f"{path}:{start} notify-failure must not generate Slack failure payload with inline Python")
+    if "json.dumps(payload" in block_text:
+        errors.append(f"{path}:{start} notify-failure must not JSON-encode Slack failure payload inline")
     if '-d "{' in block_text or "--data '{" in block_text:
         errors.append(f"{path}:{start} notify-failure must not inline raw JSON in shell")
+    if 'echo "Slack failure notification failed" >&2' in block_text and "exit 1" not in block_text:
+        errors.append(f"{path}:{start} notify-failure must fail fast when Slack post fails")
     has_run_url_env = _block_contains(
         block,
         "RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
     )
-    uses_run_url = _block_contains(block, 'run_url = os.environ.get("RUN_URL", "")') and _block_contains(
-        block,
-        '"url": run_url',
-    )
-    if not has_run_url_env or not uses_run_url:
+    if not has_run_url_env:
         errors.append(f"{path}:{start} notify-failure must link to the current workflow run")
     has_event_env = _block_contains(block, "EVENT_NAME: ${{ github.event_name }}")
-    uses_event_name = _block_contains(
-        block,
-        'event_name = os.environ.get("EVENT_NAME", "")',
-    ) and _block_contains(block, "*Trigger:* {event_name}")
-    if not has_event_env or not uses_event_name:
+    if not has_event_env:
         errors.append(f"{path}:{start} notify-failure must include the trigger in Slack output")
     return errors
 
@@ -434,6 +532,7 @@ def validate_public_safe_workflow_contract(path: Path, lines: list[str]) -> list
             errors.append(f"{path} writer workflow must push to the current ref with git push origin HEAD:${{ github.ref_name }}")
         errors.extend(_validate_monitor_dispatch_input_contract(path, lines))
         errors.extend(_validate_manual_artifact_contract(path, blocks))
+        errors.extend(_validate_monitor_diagnostic_only_contract(path, blocks))
         errors.extend(_validate_allow_fetch_failure_contract(path, blocks))
         errors.extend(_validate_monitor_slack_diagnostic_contract(path, blocks))
         errors.extend(_validate_summary_contract(path, blocks))

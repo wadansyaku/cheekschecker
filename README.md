@@ -9,9 +9,10 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - 通知対象は「論理営業日で今日以降」のセルのみです。過去セルは記録されますが Slack 通知は抑止されます（営業日ロールオーバー前提）。
 - scheduled `monitor` の正式モードは `NOTIFY_MODE=newly` です。公開 workflow では `changed` 通知の継続保証は行いません。
 - `monitor` ワークフローでは Playwright を用いた取得、`monitor_state.json` の更新、`history_masked.json` の更新、Block Kit での投稿を行います。robots.txt が `Disallow` の場合は WARN ログを出して解析をスキップし、Slack には投稿しません。
-- scheduled workflow では upstream の一時的な接続失敗を warning skip として扱います。外部サイト timeout だけでは job failure にせず、step summary / Slack warning で観測します。Slack warning は `WARNING_THROTTLE_MINUTES` で抑制し、公開状態には時刻・回数・粗いカテゴリだけを保存します。
+- scheduled workflow では upstream の一時的な接続失敗を warning skip として扱います。外部サイト timeout だけでは job failure にせず、step summary / Slack warning で観測します。Slack warning は raw exception の繰り返しではなく、原因カテゴリ、連続失敗回数、前回成功、抑制回数、詳細リンクを中心にし、`WARNING_THROTTLE_MINUTES` で抑制します。公開状態には時刻・回数・粗いカテゴリだけを保存します。
 - 取得前に HEAD リクエストで ETag / Last-Modified を確認し、未更新であればフェッチをスキップします。ただし `last_fetched_at` が古い、または未記録の場合は強制的に再取得します。結果は GitHub Step Summary にも反映され、Slack と整合します。
 - monitor の Slack 通知は実通知用の詳細を保ちますが、`GITHUB_STEP_SUMMARY` には raw counts ではなく public-safe band 表現を追記します。過去履歴を GitHub 上で確認しやすくしつつ、公開面へ exact 値を残しません。
+- Slack の `@channel` は基準達成の stage notification に限定し、人数更新、fetch warning、diagnostic には使いません。
 - 公開リポジトリに残す monitor 状態は `monitor_state.json` に限定し、`days[date]` には `met`、`stage`、`last_notified_at` だけを保存します。`last_fetched_at` は HEAD skip の鮮度判定用、`warning_throttle` は warning 抑制用の公開安全な operational metadata です。raw counts、exact ratio、例外メッセージは保存しません。
 
 ## 週次／月次サマリー（summary）
@@ -26,7 +27,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 
 ## GitHub Actions の構成
 - `.github/workflows/monitor.yml`：10 分おき／手動で実行。`monitor_state.json` と `history_masked.json` を更新し、writer job で commit / push します。手動実行時はサニタイズ済み HTML も Artifact 化します。
-- `monitor.yml` の手動実行で `send_monitor_diagnostic=true` を指定すると、実予約データではない synthetic payload を使って monitor の Slack 通知分岐を強制送信します。この診断は `monitor_state.json` と `history_masked.json` を更新せず、Webhook 未設定や送信失敗は job failure として扱います。
+- `monitor.yml` の手動実行で `send_monitor_diagnostic=true` を指定すると、実予約データではない synthetic payload を使って monitor の Slack 通知分岐だけを強制送信します。この診断では実予約通知と誤読されないようメンションを強制無効化し、通常 monitor、Artifact upload、commit はスキップされ、`monitor_state.json` と `history_masked.json` を更新しません。Webhook 未設定や送信失敗は job failure として扱います。
 - `.github/workflows/summary_weekly.yml`：週次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。手動実行時は「Cheekschecker: Webhook OK」で疎通確認後に本投稿を行います。
 - `.github/workflows/summary_monthly.yml`：月次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。週次と同じ writer transaction で commit / push します。
 - すべてのワークフローで `TZ=Asia/Tokyo`、`ROBOTS_ENFORCE=1` を設定し、robots.txt を尊重します。
@@ -47,6 +48,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - `actions/cache@v5` で pip / Playwright のキャッシュを共有し、安定かつ高速なデプロイを実現しています。
 - 生成物（サニタイズ済み HTML や期間生データ JSON）は Artifact として最長 3 日間だけ保持し、生データの露出を最小化しています。
 - writer job だけに `contents: write` を付与し、failure 通知 job には write 権限を持たせません。
+- failure 通知 job は `scripts/ci/build_slack_failure_payload.py` で Slack payload を生成し、inline JSON / inline Python を workflow に戻さない契約にしています。workflow 名・branch・trigger は mrkdwn を壊さないように正規化し、ログ URL は http/https のみボタン化します。
 
 ## 環境変数・Secrets（抜粋）
 | 変数 | 用途 | 備考 |
@@ -92,6 +94,7 @@ scripts/check_local.sh
 
 - `scripts/bootstrap_local.sh`: `.venv` 作成、依存インストール、Chromium 導入までをまとめて実行します。
 - `scripts/check_local.sh`: workflow 検証、`mypy`、`pytest --cov` をまとめて実行します。
+- ローカルと CI の品質ゲートでは、workflow 契約に加えて tracked public artifact の schema / raw-key 検査を行い、coverage は tests を含めない source-only 対象で fail-under を設定しています。
 - Playwright ブラウザの再インストールを省きたい場合は `SKIP_PLAYWRIGHT_INSTALL=1 scripts/bootstrap_local.sh` を使えます。
 
 ## プライバシーと法務

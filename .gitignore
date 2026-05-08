@@ -5,6 +5,10 @@ __pycache__/
 *.pyc
 .venv/
 state.json
+weekly_summary_raw.json
+monthly_summary_raw.json
+fetched_table_sanitized.html
+slack_failure_payload.json
 # Playwright
 playwright/.cache/
 # VS Code

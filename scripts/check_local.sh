@@ -10,5 +10,12 @@ if [ ! -x "$VENV_PYTHON" ]; then
 fi
 
 "$VENV_PYTHON" "$ROOT_DIR/scripts/ci/check_workflows.py"
+"$VENV_PYTHON" "$ROOT_DIR/scripts/ci/check_public_artifacts.py"
 "$VENV_PYTHON" -m mypy "$ROOT_DIR/watch_cheeks.py" "$ROOT_DIR/summarize.py" "$ROOT_DIR/src"
-"$VENV_PYTHON" -m pytest "$ROOT_DIR/tests" -v --cov="$ROOT_DIR" --cov-report=term-missing
+"$VENV_PYTHON" -m pytest "$ROOT_DIR/tests" -v \
+  --cov=watch_cheeks \
+  --cov=summarize \
+  --cov=src \
+  --cov=scripts/ci \
+  --cov-report=term-missing \
+  --cov-fail-under=75

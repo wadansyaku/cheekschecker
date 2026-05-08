@@ -112,8 +112,11 @@ def test_monitor_skips_when_fetch_fails_and_allowed(monkeypatch: pytest.MonkeyPa
     events = {"notify": [], "summary": [], "saved": []}
 
     async def failing_fetch_calendar_html(settings):
-        raise CalendarFetchError("connect timeout")
+        raise CalendarFetchError("connect timeout https://example.com/path?token=secret-value")
 
+    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_RUN_ID", "12345")
     monkeypatch.setattr("watch_cheeks.check_robots_allow", lambda settings: True)
     monkeypatch.setattr("watch_cheeks.fetch_calendar_html", failing_fetch_calendar_html)
     monkeypatch.setattr("watch_cheeks.load_state", lambda logical_today: {})
@@ -127,7 +130,7 @@ def test_monitor_skips_when_fetch_fails_and_allowed(monkeypatch: pytest.MonkeyPa
     )
     monkeypatch.setattr(
         "watch_cheeks.notify_slack",
-        lambda payload, settings: events["notify"].append(payload),
+        lambda payload, settings, **kwargs: events["notify"].append(payload),
     )
     monkeypatch.setattr(
         "watch_cheeks.parse_day_entries",
@@ -146,8 +149,22 @@ def test_monitor_skips_when_fetch_fails_and_allowed(monkeypatch: pytest.MonkeyPa
 
     assert len(events["summary"]) == 1
     assert "外部サイト取得失敗" in events["summary"][0][2]
+    summary_text = json.dumps(events["summary"], ensure_ascii=False)
+    assert "connect timeout" not in summary_text
+    assert "secret-value" not in summary_text
+    assert "連続失敗: 1回" in summary_text
+    assert "前回成功取得: 未記録" in summary_text
+    assert "前回通知後の抑制: 0回" in summary_text
     assert len(events["notify"]) == 1
-    assert "外部サイト取得失敗" in json.dumps(events["notify"][0], ensure_ascii=False)
+    payload_text = json.dumps(events["notify"][0], ensure_ascii=False)
+    assert "外部サイト取得失敗" in payload_text
+    assert "connect timeout" not in payload_text
+    assert "secret-value" not in payload_text
+    assert "CalendarFetchError" not in payload_text
+    assert "Traceback" not in payload_text
+    assert "連続失敗: 1回" in payload_text
+    assert "前回成功取得: 未記録" in payload_text
+    assert "https://github.com/owner/repo/actions/runs/12345" in payload_text
     assert events["saved"][0]["warning_throttle"]["monitor_fetch_failure"]["consecutive_runs"] == 1
 
 
@@ -184,7 +201,7 @@ def test_monitor_fetch_failure_warning_is_throttled(monkeypatch: pytest.MonkeyPa
     )
     monkeypatch.setattr(
         "watch_cheeks.notify_slack",
-        lambda payload, settings: events["notify"].append(payload),
+        lambda payload, settings, **kwargs: events["notify"].append(payload),
     )
 
     monitor(make_settings(allow_fetch_failure=True, warning_throttle_minutes=180))
@@ -196,15 +213,85 @@ def test_monitor_fetch_failure_warning_is_throttled(monkeypatch: pytest.MonkeyPa
     assert throttle_state["suppressed_runs"] == 1
 
 
+def test_monitor_fetch_failure_payload_reports_state_after_suppression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = {"notify": [], "summary": [], "saved": []}
+    last_warned_at = (datetime.now(tz=watch_cheeks.JST) - timedelta(minutes=181)).isoformat()
+    last_fetched_at = "2024-01-09T10:00:00+09:00"
+
+    async def failing_fetch_calendar_html(settings):
+        raise CalendarFetchError("connect timeout with raw detail")
+
+    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_RUN_ID", "98765")
+    monkeypatch.setattr("watch_cheeks.check_robots_allow", lambda settings: True)
+    monkeypatch.setattr("watch_cheeks.fetch_calendar_html", failing_fetch_calendar_html)
+    monkeypatch.setattr(
+        "watch_cheeks.load_state",
+        lambda logical_today: {
+            "last_fetched_at": last_fetched_at,
+            "warning_throttle": {
+                "monitor_fetch_failure": {
+                    "last_seen_at": last_warned_at,
+                    "last_warned_at": last_warned_at,
+                    "consecutive_runs": 2,
+                    "suppressed_runs": 3,
+                    "last_category": "fetch_unavailable",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr("watch_cheeks.save_state", lambda state: events["saved"].append(state))
+    monkeypatch.setattr(
+        "watch_cheeks.should_skip_by_http_headers", lambda settings, state: (False, {})
+    )
+    monkeypatch.setattr(
+        "watch_cheeks.append_step_summary",
+        lambda title, sections, fallback: events["summary"].append((title, sections, fallback)),
+    )
+    monkeypatch.setattr(
+        "watch_cheeks.notify_slack",
+        lambda payload, settings, **kwargs: events["notify"].append(payload),
+    )
+
+    monitor(make_settings(allow_fetch_failure=True, warning_throttle_minutes=180))
+
+    assert len(events["notify"]) == 1
+    payload_text = json.dumps(events["notify"][0], ensure_ascii=False)
+    assert "連続失敗: 3回" in payload_text
+    assert "前回成功取得: 2024-01-09 10:00 JST" in payload_text
+    assert "前回通知後の抑制: 3回" in payload_text
+    assert "https://github.com/owner/repo/actions/runs/98765" in payload_text
+    assert "connect timeout with raw detail" not in payload_text
+    throttle_state = events["saved"][0]["warning_throttle"]["monitor_fetch_failure"]
+    assert throttle_state["consecutive_runs"] == 3
+    assert throttle_state["suppressed_runs"] == 0
+
+
 def test_fetch_failure_payload_omits_invalid_action_url() -> None:
     payload, fallback, sections = watch_cheeks._build_fetch_failure_payload(
         title="Cheekschecker Monitor",
         message="外部サイト取得失敗",
         detail="connect timeout",
         target_url="not-a-url",
+        category="fetch_unavailable",
+        consecutive_runs=2,
+        suppressed_runs=1,
+        last_fetched_at="2024-01-09T10:00:00+09:00",
+        detail_url="not-a-url",
     )
 
     assert "外部サイト取得失敗" in fallback
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    sections_text = json.dumps(sections, ensure_ascii=False)
+    assert "connect timeout" not in payload_text
+    assert "connect timeout" not in fallback
+    assert "connect timeout" not in sections_text
+    assert "連続失敗: 2回" in payload_text
+    assert "前回成功取得: 2024-01-09 10:00 JST" in payload_text
+    assert "前回通知後の抑制: 1回" in sections_text
     assert sections[0][0] == "実行結果"
     assert all(block["type"] != "actions" for block in payload["blocks"])
 
@@ -236,7 +323,7 @@ def test_process_notifications_recovers_from_malformed_days_state(
     )
     monkeypatch.setattr(
         "watch_cheeks.notify_slack",
-        lambda payload, settings: events["notify"].append(payload),
+        lambda payload, settings, **kwargs: events["notify"].append(payload),
     )
 
     result = watch_cheeks.process_notifications(
@@ -279,7 +366,7 @@ def test_process_notifications_step_summary_uses_public_safe_bands(
     )
     monkeypatch.setattr(
         "watch_cheeks.notify_slack",
-        lambda payload, settings: events["notify"].append(payload),
+        lambda payload, settings, **kwargs: events["notify"].append(payload),
     )
 
     watch_cheeks.process_notifications(
@@ -296,6 +383,40 @@ def test_process_notifications_step_summary_uses_public_safe_bands(
     assert "単女4 女6" not in summary_text
     assert "/全9" not in summary_text
     assert "単女4 女6" in events["notify"][0]["text"]
+
+
+def test_notify_slack_can_use_public_safe_log_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    settings = make_settings(slack_webhook_url=None)
+    payload = {"text": "単女4 女6 /全9", "blocks": []}
+
+    monkeypatch.setattr(
+        "watch_cheeks._send_slack_message",
+        lambda webhook, payload, fallback_text, **kwargs: calls.append(
+            (webhook, payload, fallback_text, kwargs)
+        ),
+    )
+
+    watch_cheeks.notify_slack(
+        payload,
+        settings,
+        fallback_text="単女3-4 女5-6 全<10",
+    )
+
+    assert calls[0][1]["text"] == "単女4 女6 /全9"
+    assert calls[0][2] == "単女3-4 女5-6 全<10"
+
+
+def test_short_error_message_redacts_urls_and_token_values() -> None:
+    message = watch_cheeks._short_error_message(
+        CalendarFetchError("failed https://example.com/path?token=secret-value&x=1")
+    )
+
+    assert "https://example.com" not in message
+    assert "secret-value" not in message
+    assert "[redacted url]" in message
 
 
 def test_process_notifications_recovers_from_unknown_stage(
@@ -325,7 +446,7 @@ def test_process_notifications_recovers_from_unknown_stage(
     )
     monkeypatch.setattr(
         "watch_cheeks.notify_slack",
-        lambda payload, settings: events["notify"].append(payload),
+        lambda payload, settings, **kwargs: events["notify"].append(payload),
     )
 
     result = watch_cheeks.process_notifications(
@@ -355,7 +476,7 @@ def test_monitor_slack_diagnostic_sends_synthetic_payload_without_state(
 
     monkeypatch.setattr(
         "watch_cheeks.notify_slack",
-        lambda payload, settings, strict=False: events["notify"].append((payload, strict)),
+        lambda payload, settings, strict=False, **kwargs: events["notify"].append((payload, strict)),
     )
     monkeypatch.setattr(
         "watch_cheeks.append_step_summary",
@@ -364,7 +485,7 @@ def test_monitor_slack_diagnostic_sends_synthetic_payload_without_state(
     monkeypatch.setattr("watch_cheeks.save_state", lambda state: events.__setitem__("save", events["save"] + 1))
 
     send_monitor_slack_diagnostic(
-        make_settings(),
+        make_settings(ping_channel=True),
         logical_today=datetime.fromisoformat("2024-01-10T12:00:00+09:00").date(),
     )
 
@@ -374,7 +495,11 @@ def test_monitor_slack_diagnostic_sends_synthetic_payload_without_state(
     assert strict is True
     assert "【診断】" in payload["text"]
     assert "初回" in payload["text"]
-    assert "synthetic payload" in json.dumps(payload["blocks"], ensure_ascii=False)
+    rendered = json.dumps(payload, ensure_ascii=False)
+    assert "synthetic payload" in rendered
+    assert "<!channel>" not in rendered
+    assert "@channel" not in rendered
+    assert "@here" not in rendered
     assert len(events["summary"]) == 1
     assert events["summary"][0][0] == watch_cheeks.STEP_SUMMARY_TITLE_MONITOR
 

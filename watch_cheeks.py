@@ -20,9 +20,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import time
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -504,7 +505,7 @@ def _build_slack_blocks(
     settings: Settings,
 ) -> List[Dict[str, Any]]:
     blocks: List[Dict[str, Any]] = []
-    if settings.ping_channel:
+    if settings.ping_channel and stage_notifications:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "<!channel>"}})
     if stage_notifications:
         lines = "\n".join(
@@ -541,12 +542,20 @@ def _build_slack_blocks(
     return blocks
 
 
-def notify_slack(payload: Dict[str, Any], settings: Settings, *, strict: bool = False) -> None:
-    fallback_text = str(payload.get("text") or "Cheekschecker notification")
+def notify_slack(
+    payload: Dict[str, Any],
+    settings: Settings,
+    *,
+    strict: bool = False,
+    fallback_text: Optional[str] = None,
+) -> None:
+    safe_fallback = str(
+        fallback_text if fallback_text is not None else payload.get("text") or "Cheekschecker notification"
+    )
     _send_slack_message(
         settings.slack_webhook_url,
         payload,
-        fallback_text,
+        safe_fallback,
         logger=LOGGER,
         retry_fallback=False,
         raise_on_failure=strict,
@@ -861,9 +870,40 @@ def _fetch_calendar_html_requests(settings: Settings) -> Tuple[str, str]:
 
 def _short_error_message(exc: Exception, *, limit: int = 220) -> str:
     message = " ".join(str(exc).split()).strip() or exc.__class__.__name__
+    message = re.sub(r"https?://[^\s)>\]\"']+", "[redacted url]", message)
+    message = re.sub(r"(?i)(token|secret|key|password)=([^&\s]+)", r"\1=[redacted]", message)
     if len(message) <= limit:
         return message
     return message[: limit - 3] + "..."
+
+
+def _is_valid_http_url(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _github_actions_run_url_from_env(env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    source = os.environ if env is None else env
+    server_url = (source.get("GITHUB_SERVER_URL") or "https://github.com").rstrip("/")
+    repository = (source.get("GITHUB_REPOSITORY") or "").strip()
+    run_id = (source.get("GITHUB_RUN_ID") or "").strip()
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        return None
+    if not re.fullmatch(r"\d+", run_id):
+        return None
+    if not _is_valid_http_url(server_url):
+        return None
+    return f"{server_url}/{repository}/actions/runs/{run_id}"
+
+
+def _format_public_state_datetime(value: Any) -> str:
+    parsed = _parse_state_datetime(value)
+    if parsed is None:
+        return "未記録"
+    return parsed.strftime("%Y-%m-%d %H:%M JST")
 
 
 def _build_fetch_failure_payload(
@@ -872,11 +912,29 @@ def _build_fetch_failure_payload(
     message: str,
     detail: str,
     target_url: str,
+    category: str = FETCH_UNAVAILABLE_WARNING_CATEGORY,
+    consecutive_runs: Optional[int] = None,
+    suppressed_runs: Optional[int] = None,
+    last_fetched_at: Any = None,
+    detail_url: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], str, List[Tuple[str, List[str]]]]:
     fallback = f"{title}: {message}"
-    sections = [
-        ("実行結果", [message, f"detail: {detail}"]),
+    operational_lines = [
+        message,
+        f"原因カテゴリ: {category}",
     ]
+    if consecutive_runs is not None:
+        operational_lines.append(f"連続失敗: {consecutive_runs}回")
+    operational_lines.append(f"前回成功取得: {_format_public_state_datetime(last_fetched_at)}")
+    if suppressed_runs is not None:
+        operational_lines.append(f"前回通知後の抑制: {suppressed_runs}回")
+    if _is_valid_http_url(detail_url):
+        operational_lines.append("詳細: GitHub Actions run")
+
+    sections = [
+        ("実行結果", operational_lines),
+    ]
+    block_text = "*実行結果*\n" + "\n".join(operational_lines)
     blocks: List[Dict[str, Any]] = [
         {
             "type": "header",
@@ -884,21 +942,31 @@ def _build_fetch_failure_payload(
         },
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*実行結果*\n{message}\n`{detail}`"},
+            "text": {"type": "mrkdwn", "text": block_text},
         },
     ]
-    parsed_url = urlparse(target_url)
-    if parsed_url.scheme in {"http", "https"} and parsed_url.netloc:
+    action_elements: List[Dict[str, Any]] = []
+    if _is_valid_http_url(detail_url):
+        action_elements.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "詳細ログを開く"},
+                "url": detail_url,
+            }
+        )
+    if _is_valid_http_url(target_url):
+        action_elements.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "カレンダーを開く"},
+                "url": target_url,
+            }
+        )
+    if action_elements:
         blocks.append(
             {
                 "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "カレンダーを開く"},
-                        "url": target_url,
-                    }
-                ],
+                "elements": action_elements,
             }
         )
     payload = {
@@ -1193,7 +1261,7 @@ def process_notifications(
     payload = {"text": fallback, "blocks": blocks or None}
     if settings.ping_channel and not blocks:
         payload["text"] = f"<!channel> {payload['text']}"
-    notify_slack(payload, settings)
+    notify_slack(payload, settings, fallback_text=step_fallback)
 
     return state
 
@@ -1221,8 +1289,9 @@ def send_monitor_slack_diagnostic(
     logical_today: Optional[date] = None,
 ) -> None:
     """Send a synthetic public-safe monitor notification without mutating state."""
+    diagnostic_settings = replace(settings, ping_channel=False)
     if logical_today is None:
-        logical_today = derive_business_day(datetime.now(tz=JST), settings.rollover_hours)
+        logical_today = derive_business_day(datetime.now(tz=JST), diagnostic_settings.rollover_hours)
 
     entry = _build_monitor_diagnostic_entry(logical_today)
     stage_notifications = [(entry, "initial")]
@@ -1241,17 +1310,17 @@ def send_monitor_slack_diagnostic(
             newly_met,
             changed_counts,
             logical_today,
-            settings,
+            diagnostic_settings,
         )
     )
-    step_fallback = "【診断】monitor Slack 通知分岐の疎通確認\n" + build_public_safe_fallback_text(
+    step_fallback = "【診断】monitor Slack 通知分岐の疎通確認\n実予約データではない synthetic payload です\n" + build_public_safe_fallback_text(
         stage_notifications,
         newly_met,
         changed_counts,
         logical_today,
-        settings,
+        diagnostic_settings,
     )
-    fallback = "【診断】monitor Slack 通知分岐の疎通確認\n" + build_fallback_text(
+    fallback = "【診断】monitor Slack 通知分岐の疎通確認\n実予約データではない synthetic payload です\n" + build_fallback_text(
         stage_notifications, newly_met, changed_counts, logical_today
     )
     blocks = [
@@ -1269,13 +1338,13 @@ def send_monitor_slack_diagnostic(
             newly_met,
             changed_counts,
             logical_today,
-            settings,
+            diagnostic_settings,
         )
     )
     payload = {"text": fallback, "blocks": blocks}
 
     append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, step_fallback)
-    notify_slack(payload, settings, strict=True)
+    notify_slack(payload, diagnostic_settings, strict=True, fallback_text=step_fallback)
     LOGGER.info("Monitor Slack diagnostic notification sent")
 
 
@@ -1475,12 +1544,6 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
             raise
         detail = _short_error_message(exc)
         message = "外部サイト取得失敗のため今回の monitor はスキップしました"
-        payload, fallback, sections = _build_fetch_failure_payload(
-            title="Cheekschecker Monitor",
-            message=message,
-            detail=detail,
-            target_url=settings.target_url,
-        )
         LOGGER.warning("%s detail=%s", message, detail)
         should_warn, suppressed_runs = _record_warning_event(
             state,
@@ -1488,6 +1551,18 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
             category=FETCH_UNAVAILABLE_WARNING_CATEGORY,
             now=now,
             throttle_minutes=settings.warning_throttle_minutes,
+        )
+        throttle_entry = _warning_throttle_entry(state, MONITOR_FETCH_FAILURE_WARNING_KEY)
+        payload, fallback, sections = _build_fetch_failure_payload(
+            title="Cheekschecker Monitor",
+            message=message,
+            detail=detail,
+            target_url=settings.target_url,
+            category=FETCH_UNAVAILABLE_WARNING_CATEGORY,
+            consecutive_runs=int(throttle_entry.get("consecutive_runs") or 0),
+            suppressed_runs=suppressed_runs,
+            last_fetched_at=state.get("last_fetched_at"),
+            detail_url=_github_actions_run_url_from_env(),
         )
         save_state(state)
         if should_warn:

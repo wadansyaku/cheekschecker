@@ -3,9 +3,20 @@ from pathlib import Path
 from scripts.ci.check_workflows import validate_public_safe_workflow_contract
 
 
-def _notify_failure_step(workflow_name: str) -> list[str]:
+def _notify_failure_step(
+    workflow_name: str,
+    payload_lines: list[str] | None = None,
+) -> list[str]:
+    if payload_lines is None:
+        payload_lines = [
+            "          python scripts/ci/build_slack_failure_payload.py > slack_failure_payload.json",
+        ]
+
     return [
         "  notify-failure:",
+        "    needs: monitor" if workflow_name == "Monitor Calendar" else "    needs: summary",
+        "    if: failure()",
+        "    timeout-minutes: 3",
         "    permissions:",
         "      contents: read",
         "    steps:",
@@ -21,18 +32,12 @@ def _notify_failure_step(workflow_name: str) -> list[str]:
         '            echo "SLACK_WEBHOOK_URL is not set; skipping failure notification"',
         "            exit 0",
         "          fi",
-        "          python - <<'PY' > slack_failure_payload.json",
-        "          import json",
-        "          import os",
-        '          event_name = os.environ.get("EVENT_NAME", "")',
-        '          run_url = os.environ.get("RUN_URL", "")',
-        '          payload = {"text": f"Workflow Failed: *Trigger:* {event_name}", "blocks": [{"type": "actions", "elements": [{"url": run_url}]}]}',
-        "          print(json.dumps(payload, ensure_ascii=False))",
-        "          PY",
-        '          if ! curl --fail-with-body --show-error --silent -X POST "$SLACK_WEBHOOK_URL" \\',
+        *payload_lines,
+        '          if ! curl --fail-with-body --show-error --silent --max-time 10 -X POST "$SLACK_WEBHOOK_URL" \\',
         "            -H 'Content-Type: application/json' \\",
         "            --data-binary @slack_failure_payload.json; then",
         '            echo "Slack failure notification failed" >&2',
+        "            exit 1",
         "          fi",
     ]
 
@@ -92,6 +97,7 @@ def _monitor_workflow_lines(
     missing_files: str = "error",
     retention: str = "3",
     scheduled_if: str = "github.event_name == 'schedule'",
+    manual_if: str = "github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic",
 ) -> list[str]:
     return [
         "on:",
@@ -124,12 +130,12 @@ def _monitor_workflow_lines(
         "          ALLOW_FETCH_FAILURE: '1'",
         "        run: python watch_cheeks.py monitor",
         "      - name: Run monitor with sanitized artifact",
-        "        if: github.event_name == 'workflow_dispatch'",
+        f"        if: {manual_if}",
         "        env:",
         "          ALLOW_FETCH_FAILURE: '0'",
         "        run: python watch_cheeks.py monitor --sanitized-output fetched_table_sanitized.html",
         "      - name: Upload sanitized table",
-        "        if: github.event_name == 'workflow_dispatch'",
+        f"        if: {manual_if}",
         "        uses: actions/upload-artifact@v7",
         "        with:",
         "          name: sanitized-table",
@@ -137,7 +143,7 @@ def _monitor_workflow_lines(
         f"          if-no-files-found: {missing_files}",
         f"          retention-days: {retention}",
         "      - name: Upload masked history snapshot",
-        "        if: github.event_name == 'workflow_dispatch'",
+        f"        if: {manual_if}",
         "        uses: actions/upload-artifact@v7",
         "        with:",
         "          name: masked-history",
@@ -145,7 +151,7 @@ def _monitor_workflow_lines(
         f"          if-no-files-found: {missing_files}",
         "          retention-days: 3",
         "      - name: Upload monitor state snapshot",
-        "        if: github.event_name == 'workflow_dispatch'",
+        f"        if: {manual_if}",
         "        uses: actions/upload-artifact@v7",
         "        with:",
         "          name: monitor-state",
@@ -156,8 +162,10 @@ def _monitor_workflow_lines(
         "        if: github.event_name == 'workflow_dispatch' && inputs.send_monitor_diagnostic",
         "        env:",
         "          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}",
+        "          PING_CHANNEL: '0'",
         "        run: python watch_cheeks.py monitor-diagnostic",
         "      - name: Commit public-safe monitor artifacts",
+        "        if: github.event_name != 'workflow_dispatch' || !inputs.send_monitor_diagnostic",
         "        run: |",
         "          git add monitor_state.json history_masked.json",
         "          git push origin HEAD:${{ github.ref_name }}",
@@ -209,6 +217,15 @@ def test_monitor_artifact_contract_accepts_expected_shape() -> None:
     assert errors == []
 
 
+def test_monitor_manual_diagnostic_skips_normal_monitor_path() -> None:
+    errors = validate_public_safe_workflow_contract(
+        Path(".github/workflows/monitor.yml"),
+        _monitor_workflow_lines(manual_if="github.event_name == 'workflow_dispatch'"),
+    )
+
+    assert any("send_monitor_diagnostic is true" in error for error in errors)
+
+
 def test_monitor_scheduled_step_must_be_schedule_only() -> None:
     errors = validate_public_safe_workflow_contract(
         Path(".github/workflows/monitor.yml"),
@@ -231,6 +248,18 @@ def test_monitor_requires_manual_slack_diagnostic_step() -> None:
     errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
 
     assert any("Slack diagnostic step" in error for error in errors)
+
+
+def test_monitor_diagnostic_must_disable_channel_mentions() -> None:
+    lines = [
+        line
+        for line in _monitor_workflow_lines()
+        if "PING_CHANNEL: '0'" not in line
+    ]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
+
+    assert any("disable channel mentions" in error for error in errors)
 
 
 def test_summary_requires_manual_webhook_ping() -> None:
@@ -264,13 +293,83 @@ def test_summary_collection_must_not_notify_directly() -> None:
 
 def test_notify_failure_curl_must_fail_on_slack_http_errors() -> None:
     lines = [
-        line.replace("--fail-with-body --show-error --silent ", "")
+        line.replace("--fail-with-body --show-error --silent --max-time 10 ", "")
         for line in _monitor_workflow_lines()
     ]
 
     errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
 
     assert any("curl must fail on Slack HTTP errors" in error for error in errors)
+
+
+def test_notify_failure_job_is_required_for_writer_workflow() -> None:
+    lines = _monitor_workflow_lines()
+    notify_index = lines.index("  notify-failure:")
+    lines = lines[:notify_index]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
+
+    assert any("must include notify-failure job" in error for error in errors)
+
+
+def test_notify_failure_job_requires_needs_failure_and_timeout() -> None:
+    lines = [
+        line.replace("    needs: monitor", "    needs: other")
+        .replace("    if: failure()", "    if: always()")
+        .replace("    timeout-minutes: 3", "    timeout-minutes: 30")
+        for line in _monitor_workflow_lines()
+    ]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
+
+    assert any("must need monitor" in error for error in errors)
+    assert any("must run on failure()" in error for error in errors)
+    assert any("timeout-minutes: 3" in error for error in errors)
+
+
+def test_notify_failure_curl_failure_must_fail_fast() -> None:
+    lines = [line for line in _monitor_workflow_lines() if line.strip() != "exit 1"]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
+
+    assert any("fail fast" in error for error in errors)
+
+
+def test_notify_failure_payload_must_use_dedicated_script() -> None:
+    lines = _monitor_workflow_lines()
+    lines = [
+        line.replace(
+            "python scripts/ci/build_slack_failure_payload.py > slack_failure_payload.json",
+            "python scripts/ci/build_slack_failure_payload.py > other_payload.json",
+        )
+        for line in lines
+    ]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
+
+    assert any("dedicated Slack failure payload script" in error for error in errors)
+
+
+def test_notify_failure_rejects_inline_python_payload_generation() -> None:
+    inline_payload_lines = [
+        "          python - <<'PY' > slack_failure_payload.json",
+        "          import json",
+        "          import os",
+        '          event_name = os.environ.get("EVENT_NAME", "")',
+        '          run_url = os.environ.get("RUN_URL", "")',
+        '          payload = {"text": f"Workflow Failed: *Trigger:* {event_name}", "blocks": [{"type": "actions", "elements": [{"url": run_url}]}]}',
+        "          print(json.dumps(payload, ensure_ascii=False))",
+        "          PY",
+    ]
+    lines = _monitor_workflow_lines()
+    script_line = "          python scripts/ci/build_slack_failure_payload.py > slack_failure_payload.json"
+    script_index = lines.index(script_line)
+    lines = lines[:script_index] + inline_payload_lines + lines[script_index + 1 :]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
+
+    assert any("must not generate Slack failure payload with inline Python" in error for error in errors)
+    assert any("must not JSON-encode Slack failure payload inline" in error for error in errors)
 
 
 def test_writer_push_target_must_use_current_ref() -> None:
