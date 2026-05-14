@@ -127,15 +127,15 @@
     }
   },
   "etag": null,
-  "generated_at": "2026-05-14T20:56:54.120822+09:00",
+  "generated_at": "2026-05-14T23:37:38.866318+09:00",
   "last_fetched_at": "2026-05-14T20:56:54.094783+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
-      "consecutive_runs": 0,
-      "last_category": null,
-      "last_seen_at": null,
-      "last_warned_at": null,
+      "consecutive_runs": 1,
+      "last_category": "fetch_unavailable",
+      "last_seen_at": "2026-05-14T23:35:57.746891+09:00",
+      "last_warned_at": "2026-05-14T23:35:57.746891+09:00",
       "suppressed_runs": 0
     },
     "monthly_fetch_failure": {
