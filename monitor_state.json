@@ -166,9 +166,9 @@
       "stage": "none"
     },
     "2026-05-24": {
-      "last_notified_at": null,
-      "met": false,
-      "stage": "none"
+      "last_notified_at": 1779618144,
+      "met": true,
+      "stage": "initial"
     },
     "2026-05-25": {
       "last_notified_at": null,
@@ -177,15 +177,15 @@
     }
   },
   "etag": null,
-  "generated_at": "2026-05-24T17:38:27.869305+09:00",
-  "last_fetched_at": "2026-05-24T14:55:18.886930+09:00",
+  "generated_at": "2026-05-24T19:22:24.353755+09:00",
+  "last_fetched_at": "2026-05-24T19:22:24.317587+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
-      "consecutive_runs": 1,
-      "last_category": "fetch_unavailable",
-      "last_seen_at": "2026-05-24T17:36:47.021360+09:00",
-      "last_warned_at": "2026-05-24T17:36:47.021360+09:00",
+      "consecutive_runs": 0,
+      "last_category": null,
+      "last_seen_at": null,
+      "last_warned_at": null,
       "suppressed_runs": 0
     },
     "monthly_fetch_failure": {
