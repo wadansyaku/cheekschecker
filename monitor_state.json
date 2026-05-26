@@ -176,9 +176,9 @@
       "stage": "none"
     },
     "2026-05-26": {
-      "last_notified_at": null,
-      "met": false,
-      "stage": "none"
+      "last_notified_at": 1779823588,
+      "met": true,
+      "stage": "initial"
     },
     "2026-05-27": {
       "last_notified_at": null,
@@ -187,8 +187,8 @@
     }
   },
   "etag": null,
-  "generated_at": "2026-05-27T02:01:27.817426+09:00",
-  "last_fetched_at": "2026-05-27T02:01:27.784765+09:00",
+  "generated_at": "2026-05-27T04:26:28.000157+09:00",
+  "last_fetched_at": "2026-05-27T04:26:27.963448+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
