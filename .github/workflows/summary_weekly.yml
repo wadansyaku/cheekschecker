@@ -100,10 +100,8 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      - name: Generate weekly summary & notify
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json
+      - name: Generate weekly summary artifact
+        run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json --no-notify
 
       - name: Commit public-safe archives
         run: |
@@ -117,6 +115,11 @@ jobs:
           fi
           git commit -m "chore: update weekly summary"
           git push origin HEAD:${{ github.ref_name }}
+
+      - name: Notify weekly summary
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json --notify-only
 
   notify-failure:
     runs-on: ubuntu-latest

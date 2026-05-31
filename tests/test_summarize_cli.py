@@ -55,6 +55,98 @@ def test_run_summary_handles_source_unavailable(monkeypatch) -> None:
     assert len(events["slack"]) == 1
 
 
+def test_run_summary_no_notify_writes_without_slack(monkeypatch) -> None:
+    events = {"saved": [], "slack": [], "summary": []}
+
+    monkeypatch.setattr("summarize.load_masked_history", lambda path: {"mask_level": 1, "days": {}})
+    monkeypatch.setattr(
+        "summarize.load_raw_dataset",
+        lambda path: RawDataset(
+            period_label="過去7日",
+            window_days=7,
+            logical_today=date(2026, 4, 23),
+            current=[],
+            previous=[],
+            fetch_status="unavailable",
+            fetch_error="connect timeout",
+        ),
+    )
+    monkeypatch.setattr("summarize.load_summary_store", lambda path: {"weekly": {"mode": "public-safe"}})
+    monkeypatch.setattr(
+        "summarize.save_summary_store",
+        lambda path, data: events["saved"].append((path, data)),
+    )
+    monkeypatch.setattr(
+        "summarize.append_step_summary",
+        lambda title, sections, fallback: events["summary"].append((title, sections, fallback)),
+    )
+    monkeypatch.setattr(
+        "summarize.send_slack_message",
+        lambda webhook, payload, fallback: events["slack"].append((webhook, payload, fallback)),
+    )
+
+    args = argparse.Namespace(
+        period="weekly",
+        raw_data=Path("weekly_summary_raw.json"),
+        history=Path("history_masked.json"),
+        output=Path("summary_masked.json"),
+        slack_webhook="",
+        no_notify=True,
+        notify_only=False,
+    )
+
+    assert summarize.run_summary(args) == 0
+    assert len(events["saved"]) == 1
+    assert events["slack"] == []
+    assert len(events["summary"]) == 1
+
+
+def test_run_summary_notify_only_does_not_rewrite_store(monkeypatch) -> None:
+    events = {"saved": [], "slack": [], "summary": []}
+
+    monkeypatch.setattr("summarize.load_masked_history", lambda path: {"mask_level": 1, "days": {}})
+    monkeypatch.setattr(
+        "summarize.load_raw_dataset",
+        lambda path: RawDataset(
+            period_label="過去7日",
+            window_days=7,
+            logical_today=date(2026, 4, 23),
+            current=[],
+            previous=[],
+            fetch_status="unavailable",
+            fetch_error="connect timeout",
+        ),
+    )
+    monkeypatch.setattr("summarize.load_summary_store", lambda path: {"weekly": {"mode": "public-safe"}})
+    monkeypatch.setattr(
+        "summarize.save_summary_store",
+        lambda path, data: events["saved"].append((path, data)),
+    )
+    monkeypatch.setattr(
+        "summarize.append_step_summary",
+        lambda title, sections, fallback: events["summary"].append((title, sections, fallback)),
+    )
+    monkeypatch.setattr(
+        "summarize.send_slack_message",
+        lambda webhook, payload, fallback: events["slack"].append((webhook, payload, fallback)),
+    )
+
+    args = argparse.Namespace(
+        period="weekly",
+        raw_data=Path("weekly_summary_raw.json"),
+        history=Path("history_masked.json"),
+        output=Path("summary_masked.json"),
+        slack_webhook="https://hooks.slack.test/services/example",
+        no_notify=False,
+        notify_only=True,
+    )
+
+    assert summarize.run_summary(args) == 0
+    assert events["saved"] == []
+    assert len(events["slack"]) == 1
+    assert len(events["summary"]) == 1
+
+
 def test_run_ping_requires_strict_slack_delivery(monkeypatch) -> None:
     events = []
     monkeypatch.setattr(

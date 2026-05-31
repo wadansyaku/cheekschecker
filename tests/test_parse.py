@@ -182,6 +182,82 @@ def test_parse_day_entries_explicit_nested_date_beats_inference():
     assert entries[0].dow_en == "Fri"
 
 
+def test_parse_day_entries_uses_month_heading_to_avoid_stale_first_day_rollover():
+    html = """
+    <html><body><table border=\"2\">
+      <tr><td colspan=\"7\">2026年5月</td></tr>
+      <tr><td>
+        <center>1</center>
+        <center>Fri</center>
+        <font>♀A</font>
+      </td></tr>
+    </table></body></html>
+    """
+
+    entries = parse_day_entries(html, settings=BASE_SETTINGS, reference_date=date(2026, 6, 1))
+
+    assert len(entries) == 1
+    assert entries[0].business_day == date(2026, 5, 1)
+    assert entries[0].day_of_month == 1
+    assert entries[0].dow_en == "Fri"
+
+
+def test_parse_day_entries_uses_weekday_hint_for_next_month_trailing_day():
+    html = """
+    <html><body><table border=\"2\">
+      <tr><td colspan=\"7\">2026年5月</td></tr>
+      <tr><td>
+        <center>1</center>
+        <center>Mon</center>
+        <font>♀A</font>
+      </td></tr>
+    </table></body></html>
+    """
+
+    entries = parse_day_entries(html, settings=BASE_SETTINGS, reference_date=date(2026, 5, 31))
+
+    assert len(entries) == 1
+    assert entries[0].business_day == date(2026, 6, 1)
+    assert entries[0].day_of_month == 1
+    assert entries[0].dow_en == "Mon"
+
+
+def test_parse_day_entries_prefers_anchor_month_when_weekday_matches():
+    html = """
+    <html><body><table border=\"2\">
+      <tr><td colspan=\"7\">2026年3月</td></tr>
+      <tr><td>
+        <center>1</center>
+        <center>Sun</center>
+        <font>♀A</font>
+      </td></tr>
+    </table></body></html>
+    """
+
+    entries = parse_day_entries(html, settings=BASE_SETTINGS, reference_date=date(2026, 2, 10))
+
+    assert len(entries) == 1
+    assert entries[0].business_day == date(2026, 3, 1)
+    assert entries[0].dow_en == "Sun"
+
+
+def test_parse_day_entries_keeps_month_mentions_in_participant_lines():
+    html = """
+    <html><body><table border=\"2\"><tr><td>
+      <center>1</center>
+      <center>Mon</center>
+      <font>5月から参加 ♀A</font>
+    </td></tr></table></body></html>
+    """
+
+    entries = parse_day_entries(html, settings=BASE_SETTINGS, reference_date=date(2026, 6, 1))
+
+    assert len(entries) == 1
+    assert entries[0].business_day == date(2026, 6, 1)
+    assert entries[0].female == 1
+    assert entries[0].single_female == 1
+
+
 def test_parse_day_entries_ignores_weekday_labels_as_participants():
     html = """
     <html><body><table border=\"2\"><tr><td>
@@ -209,6 +285,8 @@ def test_parse_day_entries_ignores_weekday_labels_as_participants():
         (date(2024, 7, 15), 20, date(2024, 7, 20)),
         # Test case for the bug: Oct 27 should interpret "3" as Nov 3, not Oct 3
         (date(2025, 10, 27), 3, date(2025, 11, 3)),
+        (date(2026, 5, 31), 1, date(2026, 6, 1)),
+        (date(2026, 6, 1), 1, date(2026, 6, 1)),
         # Additional edge cases
         (date(2025, 10, 27), 28, date(2025, 10, 28)),  # Same month, close date
         (date(2025, 1, 5), 30, date(2024, 12, 30)),     # Early in month, high day -> previous month

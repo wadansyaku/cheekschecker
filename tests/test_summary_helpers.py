@@ -60,6 +60,54 @@ def test_build_slack_payload_includes_coverage_line() -> None:
     assert "Top3 好条件日" in payload["blocks"][3]["text"]["text"]
 
 
+def test_build_slack_payload_uses_june_first_not_stale_may_first() -> None:
+    dataset = RawDataset(
+        period_label="過去30日",
+        window_days=30,
+        logical_today=date(2026, 6, 1),
+        current=[
+            DailyRecord(
+                business_day=date(2026, 5, 1),
+                single_female=8,
+                female=10,
+                total=12,
+                ratio=0.83,
+            ),
+            DailyRecord(
+                business_day=date(2026, 6, 1),
+                single_female=3,
+                female=5,
+                total=10,
+                ratio=0.5,
+            ),
+        ],
+        previous=[],
+    )
+    history_meta = {
+        "mask_level": 1,
+        "days": {
+            "2026-05-01": {"single": "9+", "female": "9+", "total": "10-19", "ratio": "80+%"}
+        },
+    }
+
+    context = build_summary_context("monthly", dataset, history_meta)
+    assert context is not None
+    assert context.period_start == date(2026, 5, 3)
+    assert context.period_end == date(2026, 6, 1)
+    assert all(record.business_day != date(2026, 5, 1) for record in context.current)
+
+    payload, fallback, _ = build_slack_payload(
+        context,
+        "月次サマリー",
+        logical_today=date(2026, 6, 1),
+    )
+
+    rendered = fallback + "\n" + str(payload["blocks"])
+    assert "06/01(月)" in rendered
+    assert "05/01(金)" not in rendered
+    assert "1日(月)" not in rendered
+
+
 def test_raw_dataset_from_dict_tolerates_missing_record_lists() -> None:
     dataset = raw_dataset_from_dict(
         {

@@ -245,3 +245,63 @@ def test_process_notifications_limits_to_today_and_tomorrow(monkeypatch, tmp_pat
     text = captured[0]["text"]
     assert "明日" in text
     assert "2日後" not in text
+
+
+def test_process_notifications_keeps_first_day_month_boundary_state_separate(
+    monkeypatch,
+    tmp_path,
+):
+    captured = []
+
+    def fake_notify(payload, settings, **kwargs):
+        captured.append(payload)
+
+    monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", tmp_path / "monitor_state.json")
+    monkeypatch.setattr("watch_cheeks.notify_slack", fake_notify)
+    monkeypatch.setattr("watch_cheeks.time", type("T", (), {"time": staticmethod(lambda: 2000)}))
+
+    logical_today = date(2026, 5, 31)
+    existing_may_first = {
+        "met": True,
+        "stage": "initial",
+        "last_notified_at": 1000,
+    }
+
+    process_notifications(
+        [make_entry(3, 4, business_day=date(2026, 6, 1))],
+        settings=make_settings(),
+        logical_today=logical_today,
+        state={"days": {"2026-05-01": existing_may_first}},
+    )
+
+    assert len(captured) == 1
+    assert "初回" in captured[0]["text"]
+    assert "明日: 6/1(月)" in captured[0]["text"]
+    assert "5/1" not in captured[0]["text"]
+
+    saved = json.loads((tmp_path / "monitor_state.json").read_text(encoding="utf-8"))
+    assert saved["days"]["2026-05-01"] == existing_may_first
+    assert saved["days"]["2026-06-01"]["met"] is True
+
+
+def test_process_notifications_filters_stale_previous_month_first_day(
+    monkeypatch,
+    tmp_path,
+):
+    captured = []
+
+    def fake_notify(payload, settings, **kwargs):
+        captured.append(payload)
+
+    monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", tmp_path / "monitor_state.json")
+    monkeypatch.setattr("watch_cheeks.notify_slack", fake_notify)
+    monkeypatch.setattr("watch_cheeks.time", type("T", (), {"time": staticmethod(lambda: 2000)}))
+
+    process_notifications(
+        [make_entry(3, 4, business_day=date(2026, 5, 1))],
+        settings=make_settings(),
+        logical_today=date(2026, 6, 1),
+        state={"days": {}},
+    )
+
+    assert captured == []

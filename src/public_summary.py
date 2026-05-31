@@ -575,7 +575,7 @@ def _format_representation_field(stats: Dict[str, Dict[str, str]]) -> List[str]:
 
 
 def _format_day(record: SummaryRecord) -> str:
-    return f"{record.business_day.day}日({_weekday_label(record.weekday)})"
+    return f"{record.business_day.month:02d}/{record.business_day.day:02d}({_weekday_label(record.weekday)})"
 
 
 def _format_top_days_section(top_days: Sequence[SummaryRecord]) -> List[str]:

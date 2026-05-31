@@ -37,6 +37,17 @@ FULLWIDTH_TO_ASCII = str.maketrans({
 })
 MULTIPLIER_PATTERN = re.compile(r"(?:[×xX＊*])\s*([0-9０-９]+)")
 GROUP_COUNT_PATTERN = re.compile(r"([0-9０-９]+)\s*(?:人|名|組)")
+YEAR_MONTH_PATTERNS = (
+    re.compile(r"(?P<year>[12][0-9]{3})\s*年\s*(?P<month>0?[1-9]|1[0-2])\s*月"),
+    re.compile(r"(?P<year>[12][0-9]{3})\s*[/-]\s*(?P<month>0?[1-9]|1[0-2])(?:\D|$)"),
+)
+MONTH_ONLY_PATTERN = re.compile(r"(?<!\d)(?P<month>0?[1-9]|1[0-2])\s*月")
+YEAR_MONTH_HEADING_PATTERNS = (
+    re.compile(r"^[12][0-9]{3}\s*年\s*(0?[1-9]|1[0-2])\s*月\s*$"),
+    re.compile(r"^[12][0-9]{3}\s*[/-]\s*(0?[1-9]|1[0-2])\s*$"),
+)
+MONTH_ONLY_HEADING_PATTERN = re.compile(r"^(0?[1-9]|1[0-2])\s*月$")
+WEEKDAY_JP_TO_EN = {label: key for key, label in DOW_JP.items()}
 
 
 class CalendarParseSettings(Protocol):
@@ -131,6 +142,133 @@ def infer_entry_date(day: int, reference_date: date) -> date:
     return current_month_date
 
 
+def _normalise_digits(text: str) -> str:
+    return text.translate(FULLWIDTH_TO_ASCII)
+
+
+def _closest_year_for_month(month: int, reference_date: date) -> int:
+    candidates = [reference_date.year - 1, reference_date.year, reference_date.year + 1]
+    return min(
+        candidates,
+        key=lambda year: abs((date(year, month, 1) - reference_date).days),
+    )
+
+
+def _month_anchor_from_text(text: str, reference_date: date) -> Optional[date]:
+    cleaned = _normalise_digits(text).strip()
+    if not cleaned:
+        return None
+
+    for pattern in YEAR_MONTH_PATTERNS:
+        match = pattern.search(cleaned)
+        if not match:
+            continue
+        year = int(match.group("year"))
+        month = int(match.group("month"))
+        try:
+            return date(year, month, 1)
+        except ValueError:
+            return None
+
+    match = MONTH_ONLY_PATTERN.search(cleaned)
+    if match and len(cleaned) <= 24:
+        month = int(match.group("month"))
+        year = _closest_year_for_month(month, reference_date)
+        return date(year, month, 1)
+
+    return None
+
+
+def _looks_like_month_heading(text: str) -> bool:
+    cleaned = _normalise_digits(text).strip()
+    if not cleaned:
+        return False
+    if any(pattern.fullmatch(cleaned) for pattern in YEAR_MONTH_HEADING_PATTERNS):
+        return True
+    return bool(MONTH_ONLY_HEADING_PATTERN.fullmatch(cleaned))
+
+
+def extract_table_month_anchor(table: Tag, reference_date: date) -> Optional[date]:
+    for element in table.find_all(["caption", "th"]):
+        for text in element.stripped_strings:
+            anchor = _month_anchor_from_text(text, reference_date)
+            if anchor is not None:
+                return anchor
+
+    for row in table.find_all("tr")[:3]:
+        for cell in row.find_all(["td", "th"], recursive=False):
+            raw_colspan = cell.get("colspan")
+            try:
+                colspan = int(str(raw_colspan)) if raw_colspan is not None else 1
+            except ValueError:
+                colspan = 1
+            if colspan <= 1:
+                continue
+            for text in cell.stripped_strings:
+                anchor = _month_anchor_from_text(text, reference_date)
+                if anchor is not None:
+                    return anchor
+    return None
+
+
+def _shift_month(anchor: date, offset: int) -> Tuple[int, int]:
+    month_index = (anchor.year * 12) + (anchor.month - 1) + offset
+    return month_index // 12, (month_index % 12) + 1
+
+
+def _date_if_valid(year: int, month: int, day: int) -> Optional[date]:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def infer_entry_date_with_month_anchor(
+    day: int,
+    reference_date: date,
+    month_anchor: date,
+    *,
+    weekday_hint: Optional[str] = None,
+) -> date:
+    if day < 1:
+        day = 1
+
+    candidates: List[date] = []
+    for offset in (-1, 0, 1):
+        year, month = _shift_month(month_anchor, offset)
+        candidate = _date_if_valid(year, month, day)
+        if candidate is not None:
+            candidates.append(candidate)
+
+    if not candidates:
+        return infer_entry_date(day, reference_date)
+
+    base_candidate = _date_if_valid(month_anchor.year, month_anchor.month, day)
+    if weekday_hint:
+        if base_candidate is not None and business_dow_label(base_candidate) == weekday_hint:
+            return base_candidate
+        weekday_matches = [
+            candidate
+            for candidate in candidates
+            if business_dow_label(candidate) == weekday_hint
+        ]
+        if weekday_matches:
+            candidates = weekday_matches
+    elif base_candidate is not None:
+        return base_candidate
+
+    return min(
+        candidates,
+        key=lambda candidate: (
+            abs((candidate - reference_date).days),
+            0 if (
+                candidate.year == month_anchor.year
+                and candidate.month == month_anchor.month
+            ) else 1,
+        ),
+    )
+
+
 def extract_calendar_table(html: str) -> Optional[Tag]:
     soup = BeautifulSoup(html, "lxml")
 
@@ -171,9 +309,23 @@ def extract_calendar_table(html: str) -> Optional[Tag]:
 
 def extract_day_number(parts: List[str]) -> Optional[int]:
     for part in parts:
+        if _looks_like_month_heading(part):
+            continue
         match = re.search(r"(\d{1,2})", part)
         if match:
             return int(match.group(1))
+    return None
+
+
+def extract_weekday_hint(parts: List[str]) -> Optional[str]:
+    for part in parts:
+        stripped = part.strip()
+        lowered = stripped.lower()
+        for dow in DOW_EN:
+            if lowered == dow.lower():
+                return dow
+        if stripped in WEEKDAY_JP_TO_EN:
+            return WEEKDAY_JP_TO_EN[stripped]
     return None
 
 
@@ -212,9 +364,13 @@ def extract_explicit_cell_date(cell: Tag) -> Optional[date]:
 def extract_content_lines(parts: List[str]) -> List[str]:
     content_lines: List[str] = []
     for part in parts:
+        if _looks_like_month_heading(part):
+            continue
         if re.fullmatch(r"\d{1,2}", part):
             continue
         if part.lower() in {"sun", "mon", "tue", "wed", "thu", "fri", "sat"}:
+            continue
+        if part in WEEKDAY_JP_TO_EN:
             continue
         content_lines.append(part)
     return content_lines
@@ -336,10 +492,11 @@ def parse_day_entries(
         return []
 
     today = reference_date or datetime.now(tz=JST).date()
+    month_anchor = extract_table_month_anchor(table, today)
     results: List[DailyEntry] = []
 
     for cell in iter_calendar_cells(table):
-        entry = parse_calendar_cell(cell, today, settings)
+        entry = parse_calendar_cell(cell, today, settings, month_anchor=month_anchor)
         if entry is None:
             continue
 
@@ -367,6 +524,8 @@ def parse_calendar_cell(
     cell: Tag,
     today: date,
     settings: CalendarParseSettings,
+    *,
+    month_anchor: Optional[date] = None,
 ) -> Optional[DailyEntry]:
     parts = extract_cell_parts(cell)
     if not parts:
@@ -374,7 +533,14 @@ def parse_calendar_cell(
 
     explicit_date = extract_explicit_cell_date(cell)
     day_of_month = extract_day_number(parts)
-    resolved_date, resolved_day = resolve_cell_date(explicit_date, day_of_month, today)
+    weekday_hint = extract_weekday_hint(parts)
+    resolved_date, resolved_day = resolve_cell_date(
+        explicit_date,
+        day_of_month,
+        today,
+        month_anchor=month_anchor,
+        weekday_hint=weekday_hint,
+    )
     if resolved_date is None or resolved_day is None:
         return None
 
@@ -391,6 +557,9 @@ def resolve_cell_date(
     explicit_date: Optional[date],
     day_of_month: Optional[int],
     today: date,
+    *,
+    month_anchor: Optional[date] = None,
+    weekday_hint: Optional[str] = None,
 ) -> Tuple[Optional[date], Optional[int]]:
     if explicit_date is None and day_of_month is None:
         return None, None
@@ -402,7 +571,15 @@ def resolve_cell_date(
     if day_of_month is None:
         return None, None
 
-    inferred = infer_entry_date(day_of_month, today)
+    if month_anchor is not None:
+        inferred = infer_entry_date_with_month_anchor(
+            day_of_month,
+            today,
+            month_anchor,
+            weekday_hint=weekday_hint,
+        )
+    else:
+        inferred = infer_entry_date(day_of_month, today)
     return inferred, day_of_month
 
 
@@ -413,6 +590,8 @@ __all__ = [
     "count_participant_line",
     "count_participants",
     "extract_calendar_table",
+    "extract_table_month_anchor",
     "infer_entry_date",
+    "infer_entry_date_with_month_anchor",
     "parse_day_entries",
 ]

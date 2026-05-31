@@ -81,14 +81,16 @@ def _summary_weekly_workflow_lines(
         "          path: weekly_summary_raw.json",
         f"          if-no-files-found: {missing_files}",
         f"          retention-days: {retention}",
-        "      - name: Generate weekly summary & notify",
-        "        env:",
-        "          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}",
-        "        run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json",
+        "      - name: Generate weekly summary artifact",
+        "        run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json --no-notify",
         "      - name: Commit public-safe archives",
         "        run: |",
         "          git add monitor_state.json history_masked.json summary_masked.json",
         "          git push origin HEAD:${{ github.ref_name }}",
+        "      - name: Notify weekly summary",
+        "        env:",
+        "          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}",
+        "        run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json --notify-only",
     ] + _notify_failure_step("Weekly Summary")
 
 
@@ -289,6 +291,34 @@ def test_summary_collection_must_not_notify_directly() -> None:
     )
 
     assert any("without notifying" in error for error in errors)
+
+
+def test_summary_artifact_generation_must_not_notify_directly() -> None:
+    lines = [
+        line.replace(" --no-notify", "") if "summarize.py --period weekly" in line else line
+        for line in _summary_weekly_workflow_lines()
+    ]
+
+    errors = validate_public_safe_workflow_contract(
+        Path(".github/workflows/summary_weekly.yml"),
+        lines,
+    )
+
+    assert any("avoid Slack notification" in error for error in errors)
+
+
+def test_summary_notify_must_not_rewrite_artifacts() -> None:
+    lines = [
+        line.replace(" --notify-only", "") if "summarize.py --period weekly" in line else line
+        for line in _summary_weekly_workflow_lines()
+    ]
+
+    errors = validate_public_safe_workflow_contract(
+        Path(".github/workflows/summary_weekly.yml"),
+        lines,
+    )
+
+    assert any("without rewriting artifacts" in error for error in errors)
 
 
 def test_notify_failure_curl_must_fail_on_slack_http_errors() -> None:

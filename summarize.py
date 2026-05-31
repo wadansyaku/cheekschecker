@@ -67,20 +67,31 @@ def send_simple_message(webhook: str, message: str, title: str, *, strict: bool 
     send_slack_message(webhook, payload, fallback, strict=strict)
 
 
-def handle_no_data(period_title: str, webhook: str, summary_title: str) -> None:
+def _maybe_send_slack(
+    webhook: str,
+    payload: Dict[str, Any],
+    fallback: str,
+    *,
+    notify: bool,
+) -> None:
+    if notify:
+        send_slack_message(webhook, payload, fallback)
+
+
+def handle_no_data(period_title: str, webhook: str, summary_title: str, *, notify: bool = True) -> None:
     message = "No data for this period / 集計対象なし"
     title = f"Cheekschecker {period_title}"
     payload, fallback, sections = build_placeholder_summary_payload(title, message)
     append_step_summary(summary_title, sections, fallback)
-    send_slack_message(webhook, payload, fallback)
+    _maybe_send_slack(webhook, payload, fallback, notify=notify)
 
 
-def handle_broken_data(period_title: str, webhook: str, summary_title: str) -> None:
+def handle_broken_data(period_title: str, webhook: str, summary_title: str, *, notify: bool = True) -> None:
     message = "public-safe summary could not be built / 集計対象なし"
     title = f"Cheekschecker {period_title}"
     payload, fallback, sections = build_placeholder_summary_payload(title, message)
     append_step_summary(summary_title, sections, fallback)
-    send_slack_message(webhook, payload, fallback)
+    _maybe_send_slack(webhook, payload, fallback, notify=notify)
 
 
 def handle_source_unavailable(
@@ -88,6 +99,8 @@ def handle_source_unavailable(
     webhook: str,
     summary_title: str,
     detail: Optional[str] = None,
+    *,
+    notify: bool = True,
 ) -> None:
     message = "source unavailable / 外部サイト取得失敗"
     if detail:
@@ -95,7 +108,7 @@ def handle_source_unavailable(
     title = f"Cheekschecker {period_title}"
     payload, fallback, sections = build_placeholder_summary_payload(title, message)
     append_step_summary(summary_title, sections, fallback)
-    send_slack_message(webhook, payload, fallback)
+    _maybe_send_slack(webhook, payload, fallback, notify=notify)
 
 
 def run_summary(args: argparse.Namespace) -> int:
@@ -104,24 +117,28 @@ def run_summary(args: argparse.Namespace) -> int:
     period_title = "週次サマリー" if args.period == "weekly" else "月次サマリー"
     webhook = args.slack_webhook
     summary_title = STEP_SUMMARY_TITLES.get(args.period, period_title)
+    notify = not bool(getattr(args, "no_notify", False))
+    write_output = not bool(getattr(args, "notify_only", False))
 
     if dataset.fetch_status != "ok":
         LOGGER.warning(
             "Skipping summary generation because source was unavailable: %s",
             dataset.fetch_error or dataset.fetch_status,
         )
-        store = load_summary_store(args.output)
-        store[args.period] = build_masked_summary(
-            None,
-            history_meta=history_meta,
-            status="source-unavailable",
-        )
-        save_summary_store(args.output, store)
+        if write_output:
+            store = load_summary_store(args.output)
+            store[args.period] = build_masked_summary(
+                None,
+                history_meta=history_meta,
+                status="source-unavailable",
+            )
+            save_summary_store(args.output, store)
         handle_source_unavailable(
             period_title,
             webhook,
             summary_title,
             dataset.fetch_error,
+            notify=notify,
         )
         return 0
 
@@ -131,15 +148,16 @@ def run_summary(args: argparse.Namespace) -> int:
         LOGGER.exception("Failed to build public-safe summary context: %s", exc)
         context = None
 
-    store = load_summary_store(args.output)
-    store[args.period] = build_masked_summary(context, history_meta=history_meta)
-    save_summary_store(args.output, store)
+    if write_output:
+        store = load_summary_store(args.output)
+        store[args.period] = build_masked_summary(context, history_meta=history_meta)
+        save_summary_store(args.output, store)
 
     if context is None:
         if dataset.current:
-            handle_broken_data(period_title, webhook, summary_title)
+            handle_broken_data(period_title, webhook, summary_title, notify=notify)
         else:
-            handle_no_data(period_title, webhook, summary_title)
+            handle_no_data(period_title, webhook, summary_title, notify=notify)
         return 0
 
     payload, fallback_text, summary_sections = build_slack_payload(
@@ -148,7 +166,7 @@ def run_summary(args: argparse.Namespace) -> int:
         logical_today=dataset.logical_today,
     )
     append_step_summary(summary_title, summary_sections, fallback_text)
-    send_slack_message(webhook, payload, fallback_text)
+    _maybe_send_slack(webhook, payload, fallback_text, notify=notify)
     return 0
 
 
@@ -165,6 +183,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--history", type=Path, default=Path("history_masked.json"))
     parser.add_argument("--output", type=Path, default=Path("summary_masked.json"))
     parser.add_argument("--ping-only", action="store_true")
+    parser.add_argument("--no-notify", action="store_true", help="Write summary artifacts without Slack notification")
+    parser.add_argument("--notify-only", action="store_true", help="Send Slack notification without rewriting summary artifacts")
     parser.add_argument("--slack-webhook", dest="slack_webhook", default=os.getenv("SLACK_WEBHOOK_URL", ""))
     return parser
 
@@ -174,11 +194,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.ping_only:
         return run_ping(args)
+    if args.no_notify and args.notify_only:
+        parser.error("--no-notify and --notify-only cannot be used together")
     if not args.raw_data:
         LOGGER.warning("--raw-data not provided; treating as no data")
         period_title = "週次サマリー" if args.period == "weekly" else "月次サマリー"
         summary_title = STEP_SUMMARY_TITLES.get(args.period, period_title)
-        handle_no_data(period_title, args.slack_webhook, summary_title)
+        handle_no_data(period_title, args.slack_webhook, summary_title, notify=not args.no_notify)
         return 0
     return run_summary(args)
 

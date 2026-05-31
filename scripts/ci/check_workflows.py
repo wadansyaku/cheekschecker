@@ -414,19 +414,39 @@ def _validate_summary_contract(
         if not _step_has_line(block, expected_run):
             errors.append(f"{path}:{start} summary collection must write {raw_output} without notifying")
 
-    notify = _find_step_block(blocks, f"Generate {period} summary & notify")
+    generate = _find_step_block(blocks, f"Generate {period} summary artifact")
+    if generate is None:
+        errors.append(f"{path} summary workflow must generate the {period} summary artifact")
+    else:
+        start, block = generate
+        expected_run = (
+            f"run: python summarize.py --period {period} --raw-data {raw_output} "
+            "--history history_masked.json --output summary_masked.json --no-notify"
+        )
+        if not _step_has_line(block, expected_run):
+            errors.append(f"{path}:{start} summary artifact generation must avoid Slack notification")
+
+    notify = _find_step_block(blocks, f"Notify {period} summary")
     if notify is None:
-        errors.append(f"{path} summary workflow must generate and notify the {period} summary")
+        errors.append(f"{path} summary workflow must notify the {period} summary after commit")
     else:
         start, block = notify
         if not _step_has_line(block, "SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}"):
             errors.append(f"{path}:{start} summary notify must use SLACK_WEBHOOK_URL secret")
         expected_run = (
             f"run: python summarize.py --period {period} --raw-data {raw_output} "
-            "--history history_masked.json --output summary_masked.json"
+            "--history history_masked.json --output summary_masked.json --notify-only"
         )
         if not _step_has_line(block, expected_run):
-            errors.append(f"{path}:{start} summary notify must consume {raw_output}")
+            errors.append(f"{path}:{start} summary notify must consume {raw_output} without rewriting artifacts")
+
+    commit = _find_step_block(blocks, "Commit public-safe archives")
+    if generate is not None and commit is not None and notify is not None:
+        generate_start, _ = generate
+        commit_start, _ = commit
+        notify_start, _ = notify
+        if not (generate_start < commit_start < notify_start):
+            errors.append(f"{path} summary workflow must commit summary artifacts before Slack notification")
 
     return errors
 

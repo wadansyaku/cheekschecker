@@ -344,7 +344,7 @@ def log_parsing_snapshot(entries: Sequence[DailyEntry], logical_today: date) -> 
 
 
 def _format_business_label(target: date, logical_today: date) -> str:
-    label = f"{target.day}日({DOW_JP[_business_dow_label(target)]})"
+    label = f"{target.month}/{target.day}({DOW_JP[_business_dow_label(target)]})"
     if target == logical_today + timedelta(days=1):
         return f"明日: {label}"
     if target > logical_today + timedelta(days=1):
