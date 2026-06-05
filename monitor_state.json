@@ -234,11 +234,16 @@
       "last_notified_at": null,
       "met": false,
       "stage": "none"
+    },
+    "2026-06-07": {
+      "last_notified_at": null,
+      "met": false,
+      "stage": "none"
     }
   },
   "etag": null,
-  "generated_at": "2026-06-06T05:22:04.130870+09:00",
-  "last_fetched_at": "2026-06-06T05:22:04.115164+09:00",
+  "generated_at": "2026-06-06T06:55:14.718331+09:00",
+  "last_fetched_at": "2026-06-06T06:55:14.702846+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
