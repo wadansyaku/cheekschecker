@@ -236,14 +236,19 @@
       "stage": "bonus"
     },
     "2026-06-07": {
-      "last_notified_at": 1780762614,
-      "met": true,
-      "stage": "initial"
+      "last_notified_at": null,
+      "met": false,
+      "stage": "none"
+    },
+    "2026-06-08": {
+      "last_notified_at": null,
+      "met": false,
+      "stage": "none"
     }
   },
   "etag": null,
-  "generated_at": "2026-06-07T01:16:54.992188+09:00",
-  "last_fetched_at": "2026-06-07T01:16:54.973954+09:00",
+  "generated_at": "2026-06-07T02:39:24.783608+09:00",
+  "last_fetched_at": "2026-06-07T02:39:24.766121+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
