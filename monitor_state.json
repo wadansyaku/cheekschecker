@@ -299,18 +299,23 @@
       "last_notified_at": null,
       "met": false,
       "stage": "none"
+    },
+    "2026-06-20": {
+      "last_notified_at": null,
+      "met": false,
+      "stage": "none"
     }
   },
   "etag": null,
-  "generated_at": "2026-06-19T03:44:59.473493+09:00",
-  "last_fetched_at": "2026-06-19T01:19:44.874090+09:00",
+  "generated_at": "2026-06-19T06:13:40.257074+09:00",
+  "last_fetched_at": "2026-06-19T06:13:40.219743+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
-      "consecutive_runs": 1,
-      "last_category": "fetch_unavailable",
-      "last_seen_at": "2026-06-19T03:43:18.510822+09:00",
-      "last_warned_at": "2026-06-19T03:43:18.510822+09:00",
+      "consecutive_runs": 0,
+      "last_category": null,
+      "last_seen_at": null,
+      "last_warned_at": null,
       "suppressed_runs": 0
     },
     "monthly_fetch_failure": {
