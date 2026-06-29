@@ -139,14 +139,14 @@
       }
     },
     "day_count": 7,
-    "generated_at": "2026-06-22T15:40:52.549806+09:00",
+    "generated_at": "2026-06-29T15:06:02.318250+09:00",
     "mask_level": 1,
     "mode": "public-safe",
-    "period_end": "2026-06-22",
-    "period_start": "2026-06-16",
+    "period_end": "2026-06-29",
+    "period_start": "2026-06-23",
     "stats": {
       "female": {
-        "average": "9+",
+        "average": "7-8",
         "max": "9+",
         "median": "7-8"
       },
@@ -163,40 +163,40 @@
       "total": {
         "average": "20-29",
         "max": "30-49",
-        "median": "20-29"
+        "median": "10-19"
       }
     },
     "status": "ok",
     "top_days": [
       {
         "female": "9+",
-        "label": "06/20(土)",
+        "label": "06/27(土)",
         "ratio": "40±",
         "single": "5-6",
         "source": "raw",
         "total": "30-49"
       },
       {
-        "female": "9+",
-        "label": "06/19(金)",
-        "ratio": "40±",
-        "single": "3-4",
-        "source": "raw",
-        "total": "30-49"
-      },
-      {
-        "female": "9+",
-        "label": "06/21(日)",
+        "female": "7-8",
+        "label": "06/28(日)",
         "ratio": "<40%",
         "single": "2",
         "source": "raw",
-        "total": "20-29"
+        "total": "10-19"
+      },
+      {
+        "female": "5-6",
+        "label": "06/25(木)",
+        "ratio": "<40%",
+        "single": "3-4",
+        "source": "raw",
+        "total": "10-19"
       }
     ],
     "trend": {
-      "female": "flat",
+      "female": "down",
       "ratio": "flat",
-      "single": "down"
+      "single": "up"
     },
     "weekday_profile": {
       "土": {
@@ -206,10 +206,10 @@
         "total": "30-49"
       },
       "日": {
-        "female": "9+",
+        "female": "7-8",
         "ratio": "<40%",
         "single": "2",
-        "total": "20-29"
+        "total": "10-19"
       },
       "月": {
         "female": "0",
@@ -218,27 +218,27 @@
         "total": "<10"
       },
       "木": {
-        "female": "7-8",
-        "ratio": "<40%",
-        "single": "1",
-        "total": "20-29"
-      },
-      "水": {
         "female": "5-6",
         "ratio": "<40%",
         "single": "3-4",
         "total": "10-19"
       },
+      "水": {
+        "female": "3-4",
+        "ratio": "<40%",
+        "single": "2",
+        "total": "10-19"
+      },
       "火": {
-        "female": "5-6",
+        "female": "9+",
         "ratio": "<40%",
         "single": "3-4",
-        "total": "20-29"
+        "total": "30-49"
       },
       "金": {
         "female": "9+",
-        "ratio": "40±",
-        "single": "3-4",
+        "ratio": "<40%",
+        "single": "5-6",
         "total": "30-49"
       }
     }
