@@ -387,8 +387,8 @@
     }
   },
   "etag": null,
-  "generated_at": "2026-07-05T18:57:38.889923+09:00",
-  "last_fetched_at": "2026-07-05T18:57:38.871958+09:00",
+  "generated_at": "2026-07-05T20:45:20.591342+09:00",
+  "last_fetched_at": "2026-07-05T20:45:20.575695+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
