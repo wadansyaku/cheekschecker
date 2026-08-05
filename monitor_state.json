@@ -533,7 +533,7 @@
     "2026-08-05": {
       "last_notified_at": 1785944152,
       "met": true,
-      "stage": "bonus"
+      "stage": "initial"
     },
     "2026-08-06": {
       "last_notified_at": null,
@@ -542,8 +542,8 @@
     }
   },
   "etag": null,
-  "generated_at": "2026-08-06T02:11:43.257789+09:00",
-  "last_fetched_at": "2026-08-06T02:11:43.241379+09:00",
+  "generated_at": "2026-08-06T03:55:40.566870+09:00",
+  "last_fetched_at": "2026-08-06T03:55:40.552670+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
