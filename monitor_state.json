@@ -642,8 +642,8 @@
     }
   },
   "etag": null,
-  "generated_at": "2026-08-25T08:31:36.224094+09:00",
-  "last_fetched_at": "2026-08-25T08:31:36.179615+09:00",
+  "generated_at": "2026-08-25T08:53:26.040368+09:00",
+  "last_fetched_at": "2026-08-25T08:53:25.990446+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
