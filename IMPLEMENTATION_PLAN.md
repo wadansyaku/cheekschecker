@@ -14,6 +14,14 @@
 - [独立起動Worker](scheduler/README.md)を実装しました。新規Cloudflare設置と対象repo限定のGitHub認証は未承認・未実施であり、GitHub cronの長期間隔が解消したとは扱いません。
 - スマートフォン実機・OS通知・既読・受信者の理解、GitHubへの最終push失敗やSlack応答喪失時の完全な重複防止は引き続き別の受け入れ条件です。
 
+追加実装は [8dfed2a](https://github.com/wadansyaku/cheekschecker/commit/8dfed2aa9f2973c658dce29c20b2c666f2beb23c) でmainへ反映しました。
+
+- [追加CI](https://github.com/wadansyaku/cheekschecker/actions/runs/38694739569): Python 225 testsとWorker 19 testsが成功、source coverage 84.14%、型・workflow・public artifact検査が成功しました。新規helperのlint/整形は成功し、リポジトリ全体の既存lint/整形指摘は残っています。
+- [障害通知の実動作](https://github.com/wadansyaku/cheekschecker/actions/runs/38694941029): monitorを診断として意図的に失敗させたためrun全体のfailureは期待どおりです。failure jobのcheckoutと正式Webhook送信はsuccessで、15:51 JSTに実Slackで「診断」と明示された日本語の障害通知を受信・表示確認しました。通常監視・artifact・state commitはskippedでした。
+- [独立起動の受け口](https://github.com/wadansyaku/cheekschecker/actions/runs/38695255465): Workerの判断ロジックをローカルから既存GitHub CLIへ接続して、実際のAPIデータでmainを起動しました。既存CLI認証をCloudflareへ渡してはいません。独立起動用monitor、取得・解析・公開state commit/pushはsuccess、manual artifactとsynthetic通知はskippedです。新たな通知対象の変化はありませんでした。
+- [同じイベントの再配信](https://github.com/wadansyaku/cheekschecker/actions/runs/38695754859): 同じexternal_tickで再実行しsuccess。再取得ログ・通知はなく、commitは変更なし、monitor_stateのGit blobも再実行前後で一致しました。
+- Cloudflare向けのdry-runビルドは成功し、既存アカウントへの認証も読み取りで確認しました。専用GitHub認証は未作成で、Workerの新設・定期イベントの発火・24時間以上の間隔検証は未実施です。
+
 ユーザーの明示承認に基づき、最新の公開state履歴を保持してmainへpushしました。実装コミットは [43c09fe](https://github.com/wadansyaku/cheekschecker/commit/43c09fed49c653f59003824cdc6da48d8c3f8307)、手動artifact生成の追加修正は [62ba2c4](https://github.com/wadansyaku/cheekschecker/commit/62ba2c4e7e93b5e37cd0ea1be9db3367864aa0cc) です。
 
 - [本番CI](https://github.com/wadansyaku/cheekschecker/actions/runs/38690201110): 213 tests成功、source coverage 84.16%、mypy・workflow・public artifact検査成功。既存のlint/整形指摘は今回一括修正していません。
