@@ -2,6 +2,16 @@
 
 2026-10-15 に現行コードとテストを再点検しました。以下の最新評価・実装結果を優先し、その後に2026-04-24の計画履歴を残しています。
 
+## 2026-10-15 本番反映と受け入れ結果
+
+ユーザーの明示承認に基づき、最新の公開state履歴を保持してmainへpushしました。実装コミットは [43c09fe](https://github.com/wadansyaku/cheekschecker/commit/43c09fed49c653f59003824cdc6da48d8c3f8307)、手動artifact生成の追加修正は [62ba2c4](https://github.com/wadansyaku/cheekschecker/commit/62ba2c4e7e93b5e37cd0ea1be9db3367864aa0cc) です。
+
+- [本番CI](https://github.com/wadansyaku/cheekschecker/actions/runs/38690201110): 213 tests成功、source coverage 84.16%、mypy・workflow・public artifact検査成功。既存のlint/整形指摘は今回一括修正していません。
+- [正式Webhookの5状態診断](https://github.com/wadansyaku/cheekschecker/actions/runs/38690204136): mainの新コードを実行しsuccess。実Slackで15:04 JSTの正式通知アプリから5件を読み戻し、通常通知・週次のデータ不足・取得失敗・観測なし・監視復旧を確認しました。Slackデスクトップの通常幅で見出し、本文、欠測表示、略語説明、主要ボタンの緑色表示を確認しました。実予約取得・artifact upload・state commitはすべてskippedで、メンションもありません。
+- [実カレンダーによる本番monitor](https://github.com/wadansyaku/cheekschecker/actions/runs/38690344158): 取得・解析、sanitized/公開state artifact生成、state commit・pushが成功。15:05 JSTの観測では新たな通知対象の変化がなく、通常通知は送信しませんでした。公開state更新は [e217808](https://github.com/wadansyaku/cheekschecker/commit/e217808) です。一時的なpush障害は発生せず、retry動作は回帰テストで検証しています。
+
+残る優先課題はscheduled起動の遅延・欠落の原因調査です。GitHubの最終push失敗時の配送重複、failure jobの実障害による発火、スマートフォン実機・OS通知・受信者の理解や既読は今回の成功範囲に含めません。Slackのprivate URLや本文、実予約の人数・個人情報は公開文書へ保存していません。
+
 ## 2026-10-15 評価と改善計画
 
 対象は取得・HTML解析・営業日判定・通知state・Slack/Step Summaryの表示・公開保存境界・writer/failure workflow・ローカル検証です。独立したWebアプリはなく、ユーザーの主な体験は「Slackで変化を理解し、カレンダーを開き、必要なら公開集計や実行ログを確認する」動線です。既存の公開安全な保存形式と今日・明日の通知範囲を保った改善を優先しました。初回実装時には外部サイト、実Slack、GitHub Actionsの実runを実行せず、追加依頼後の確認を後段に記録しています。
@@ -26,7 +36,7 @@
 
 ### 次段階の優先順位
 
-1. **公開前の受け入れ確認**: 実Slackへの4状態の表示確認と公開済みmainの診断受信は追加確認で完了。今回の未公開変更を正式Webhookで実行する確認と、変更後のfailure job/writerの実run確認を残す。push・本番反映は未実施。
+1. **監視起動の信頼性**: main反映・CI・正式Webhook5状態・本番monitorのwriter実run確認は完了。scheduled起動の遅延・欠落を優先調査し、GitHub基盤障害を含むfailure通知の検証と、必要なら起動基盤の選択を別途進める。
 2. **配送と保存の独立障害**: Slack受付後のローカル保存・push失敗では重複が残る。workflow失敗時はローカルの取得失敗記録もリモートcommitされない。将来は公開安全なpending stateとwriterの失敗時保存方針を設計し、受付応答が失われた場合も含めた復旧契約を定める。現時点でexactly-onceを保証しない。
 3. **MASK_LEVEL=2のsummary補完**: 既定level2ラベルは保存できるが、summary補完はlevel1帯域だけ逆変換するため欠測になる。scheduledのlevel1は維持し、別途level2の統計表現と比較可能性を決めて回帰検証する。
 4. **設定・保守の整理**: 任意カスタムラベルは公開保存不可になった。必要なら設定読込時の明示的な検証を追加する。既存のlint/整形指摘と依存更新は、本変更と分けて互換性を確認しながら整備する。
