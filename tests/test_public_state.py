@@ -2,6 +2,8 @@ import json
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from src import public_state
 
 
@@ -254,3 +256,53 @@ def test_summary_store_sanitizer_keeps_public_safe_shape(tmp_path: Path) -> None
     assert len(saved["weekly"]["top_days"]) == 1
     assert "exact_ratio" not in saved["weekly"]["top_days"][0]
     assert saved["monthly"]["status"] == "source-unavailable"
+
+
+@pytest.mark.parametrize("metric", ["single", "female", "total", "ratio"])
+@pytest.mark.parametrize("unsafe_label", ["Alice", "女性13人", "13/27", "50.25 %"])
+def test_masked_history_rejects_free_text_labels(
+    tmp_path: Path, metric: str, unsafe_label: str,
+) -> None:
+    path = tmp_path / "history_masked.json"
+    entry = {"single": "3-4", "female": "5-6", "total": "10-19", "ratio": "50±"}
+    entry[metric] = unsafe_label
+
+    public_state.save_masked_history({"days": {"2026-05-15": entry}}, path=path)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["days"] == {}
+    assert unsafe_label not in path.read_text(encoding="utf-8")
+
+
+def test_masked_history_preserves_known_level_two_labels(tmp_path: Path) -> None:
+    path = tmp_path / "history_masked.json"
+    entry = {"single": "穏", "female": "適", "total": "並", "ratio": "中"}
+
+    public_state.save_masked_history({"mask_level": 2, "days": {"2026-05-15": entry}}, path=path)
+
+    assert public_state.load_masked_history(path)["days"] == {"2026-05-15": entry}
+
+
+def test_summary_store_restricts_public_text_fields(tmp_path: Path) -> None:
+    path = tmp_path / "summary_masked.json"
+    entry = {"single": "3-4", "female": "5-6", "total": "10-19", "ratio": "50±"}
+    public_state.save_summary_store(
+        path,
+        {
+            "weekly": {
+                "stats": {"female": {"average": "-", "median": "Alice", "max": "女性13人"}},
+                "top_days": [
+                    {"label": label, **entry}
+                    for label in ["15日(月)", "05/15(月)", "Alice", "05/15(月) Alice", "02/31(月)"]
+                ],
+                "weekday_profile": {"月": entry, "Alice": entry, "月 Alice": entry},
+            }
+        },
+    )
+
+    saved = json.loads(path.read_text(encoding="utf-8"))["weekly"]
+    assert saved["stats"] == {"female": {"average": "-"}}
+    assert [item["label"] for item in saved["top_days"]] == ["15日(月)", "05/15(月)"]
+    assert saved["weekday_profile"] == {"月": entry}
+    assert "Alice" not in path.read_text(encoding="utf-8")
+    assert "女性13人" not in path.read_text(encoding="utf-8")

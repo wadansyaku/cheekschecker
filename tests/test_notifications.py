@@ -180,6 +180,18 @@ def test_send_slack_message_drops_null_blocks_and_uses_clean_text(monkeypatch) -
     assert calls == [{"text": "fallback text"}]
 
 
+@pytest.mark.parametrize("style", ["primary", "danger", "unsupported"])
+def test_normalize_button_preserves_only_supported_styles(style):
+    payload, _ = notifications.normalize_slack_payload({
+        "text": "Open calendar", "blocks": [{"type": "actions", "elements": [{
+            "type": "button", "text": {"type": "plain_text", "text": "Open"},
+            "url": "https://example.com", "style": style,
+        }]}],
+    }, "Open calendar")
+    button = payload["blocks"][0]["elements"][0]
+    assert button.get("style") == (style if style in ("primary", "danger") else None)
+
+
 def test_send_slack_message_forces_safe_text_objects(monkeypatch) -> None:
     calls = []
 

@@ -475,6 +475,17 @@ def _validate_notify_failure_contract(
     if "contents: write" in notify_failure_section:
         errors.append(f"{path} notify-failure job must not request contents: write")
 
+    failure_blocks = _workflow_step_blocks(notify_failure_lines)
+    failure_notify = _find_step_block(failure_blocks, "Notify Slack on failure")
+    before_notify = (
+        notify_failure_lines[: failure_notify[0] - 1]
+        if failure_notify is not None else []
+    )
+    if not any(ref.startswith("actions/checkout@") for ref in _action_refs(before_notify)):
+        errors.append(
+            f"{path} notify-failure job must check out its payload script before Slack notification"
+        )
+
     notify_step = _find_step_block(blocks, "Notify Slack on failure")
     if notify_step is None:
         errors.append(f"{path} notify-failure job must include a Slack notification step")
@@ -548,8 +559,12 @@ def validate_public_safe_workflow_contract(path: Path, lines: list[str]) -> list
         expected_add = WRITER_COMMIT_TARGETS[path_name]
         if not _contains_line(lines, expected_add):
             errors.append(f"{path} writer workflow must commit exactly: {expected_add}")
-        if not _contains_line(lines, "git push origin HEAD:${{ github.ref_name }}"):
-            errors.append(f"{path} writer workflow must push to the current ref with git push origin HEAD:${{ github.ref_name }}")
+        commit = _find_step_block(blocks, "Commit public-safe")
+        if commit is None or not _step_has_line(commit[1], "WRITER_REF: ${{ github.ref_name }}"):
+            errors.append(f"{path} writer workflow must push to the current ref through WRITER_REF")
+        push_command = 'python scripts/ci/push_with_retry.py "$WRITER_REF"'
+        if commit is None or not _step_has_line(commit[1], push_command):
+            errors.append(f"{path} writer workflow must use the bounded push retry helper")
         errors.extend(_validate_monitor_dispatch_input_contract(path, lines))
         errors.extend(_validate_manual_artifact_contract(path, blocks))
         errors.extend(_validate_monitor_diagnostic_only_contract(path, blocks))

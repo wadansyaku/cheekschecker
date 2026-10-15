@@ -167,3 +167,15 @@ def test_run_ping_requires_strict_slack_delivery(monkeypatch) -> None:
             True,
         )
     ]
+
+
+def test_summary_delivery_failure_is_not_success(monkeypatch):
+    import pytest
+    import requests
+
+    def fail_post(*args, **kwargs):
+        raise requests.Timeout("timeout")
+
+    monkeypatch.setattr("src.notifications.requests.post", fail_post)
+    with pytest.raises(RuntimeError, match="notifications failed"):
+        summarize.handle_no_data("週次サマリー", "https://hooks.slack.test/services/example", "Summary")

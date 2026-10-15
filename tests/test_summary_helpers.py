@@ -21,7 +21,7 @@ def test_build_placeholder_summary_payload() -> None:
     assert "blocks" in payload
     assert "Cheekschecker 週次サマリー" in fallback
     assert sections[0][0] == "最新観測"
-    assert "public-safe approximation" in payload["blocks"][1]["elements"][0]["text"]
+    assert "0人や条件未達を示すものではありません" in payload["blocks"][1]["elements"][0]["text"]
 
 
 def test_build_slack_payload_includes_coverage_line() -> None:
@@ -55,9 +55,9 @@ def test_build_slack_payload_includes_coverage_line() -> None:
     assert context is not None
 
     payload, fallback, sections = build_slack_payload(context, "週次サマリー")
-    assert "カバレッジ" in fallback
+    assert "データ充足" in fallback
     assert any(section[0] == "傾向・曜日・カバレッジ" for section in sections)
-    assert "Top3 好条件日" in payload["blocks"][3]["text"]["text"]
+    assert "Top3 比率の高い観測日（概算）" in payload["blocks"][3]["text"]["text"]
 
 
 def test_build_slack_payload_uses_june_first_not_stale_may_first() -> None:
@@ -217,7 +217,7 @@ def test_build_slack_payload_tolerates_partial_context_fields() -> None:
 
     assert payload["text"] == fallback
     assert "単女-" in fallback
-    assert "単女? / 女? / 比率?" in fallback
+    assert "単女比較データ不足 / 女比較データ不足 / 比率比較データ不足" in fallback
     assert any(section[0] == "傾向・曜日・カバレッジ" for section in sections)
 
 
@@ -243,3 +243,14 @@ def test_build_slack_payload_uses_placeholder_for_empty_context() -> None:
     assert "集計対象なし" in fallback
     assert payload["blocks"][0]["type"] == "header"
     assert sections[0][0] == "最新観測"
+
+
+def test_summary_actions_prioritize_calendar_and_explain_abbreviations(monkeypatch):
+    from src.public_summary import _build_summary_actions_block
+
+    monkeypatch.setenv("TARGET_URL", "https://example.com/calendar")
+    actions = _build_summary_actions_block()["elements"]
+    assert actions[0]["text"]["text"] == "カレンダーを開く"
+    assert actions[0]["style"] == "primary"
+    assert actions[0]["url"] == "https://example.com/calendar"
+    assert len(actions) == 3

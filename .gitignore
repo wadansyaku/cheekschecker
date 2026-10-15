@@ -9,6 +9,7 @@ weekly_summary_raw.json
 monthly_summary_raw.json
 fetched_table_sanitized.html
 slack_failure_payload.json
+notification_preview.html
 # Playwright
 playwright/.cache/
 # VS Code

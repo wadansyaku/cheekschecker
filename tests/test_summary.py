@@ -76,7 +76,7 @@ def test_load_and_build_summary(tmp_path: Path) -> None:
 
     payload, fallback, step_sections = build_slack_payload(context, "週次サマリー")
     assert "blocks" in payload and payload["blocks"]
-    assert "Top3 好条件日" in payload["blocks"][3]["text"]["text"]
+    assert "Top3 比率の高い観測日（概算）" in payload["blocks"][3]["text"]["text"]
     assert "public-safe approximation" in fallback
     assert "Cheekschecker 週次サマリー" in fallback
     assert len(step_sections) == 4
@@ -137,3 +137,33 @@ def test_top_days_prefers_latest_when_tied() -> None:
 
     assert top_days[0].business_day == base_day + timedelta(days=1)
     assert top_days[1].business_day == base_day
+
+
+def test_invalid_measurements_are_missing_and_real_zero_is_observed():
+    from src.public_summary import raw_dataset_from_dict
+
+    payload = {
+        "logical_today": "2026-10-15",
+        "window_days": 7,
+        "days": [
+            {"date": "2026-10-15"},
+            {"date": "2026-10-14", "single_female": 0, "female": 0, "total": 0},
+            {"date": "2026-10-13", "single_female": "NaN", "female": 4, "total": 10},
+            {"date": "2026-10-12", "single_female": 5, "female": 4, "total": 10},
+            {"date": "2026-10-11", "single_female": 1, "female": 4, "total": 3},
+            {"date": "2026-10-10", "single_female": 1, "female": None, "total": 3},
+            {"date": "2026-10-09", "single_female": 1.5, "female": 4, "total": 10},
+        ],
+    }
+    dataset = raw_dataset_from_dict(payload)
+    context = build_summary_context("weekly", dataset, {"days": {}})
+    assert context is not None
+    assert context.day_count == 1
+    assert context.current[0].business_day == date(2026, 10, 14)
+    assert context.current[0].female_value == 0
+    assert context.coverage_current.raw_days == 1
+    assert context.coverage_current.missing_days == 6
+    _, fallback, _ = build_slack_payload(context, "週次サマリー")
+    assert "未取得 6日" in fallback
+    assert "比較データ不足" in fallback
+    assert "未取得日は0人として集計しません" in fallback

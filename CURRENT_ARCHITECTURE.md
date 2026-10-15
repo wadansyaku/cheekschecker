@@ -1,6 +1,17 @@
 # Current Architecture
 
-この文書は 2026-04-24 時点の Cheekschecker の現行運用前提をまとめたものです。
+この文書は 2026-10-15 時点の Cheekschecker のローカル実装契約をまとめたものです。本番反映・実Slackでの受信確認は別の検証です。
+
+## 2026-10-15 の更新
+- 通常通知とsummary通知は送信失敗を実行失敗として伝えます。通常通知のstateは送信受付後に保存し、失敗時に入力stateを変更しません。Slack受付・Git保存・pushは独立した処理なので、受付後の保存失敗やpush失敗で重複する可能性は残ります。
+- 取得失敗の事実と警告の送信済み日時を区別します。警告送信失敗時やmanualのfail-fastでもローカルに取得失敗回数を残し、警告送信済み日時は進めません。workflow自体が失敗した場合は通常commit stepへ到達しないため、その失敗記録のリモート永続化は保証しません。
+- HEAD skipではETagを優先し、営業日変更・失敗からの復旧時は再取得します。validatorと取得成功時刻は解析成功後に確定します。解析できない空ページはsource-unavailable扱いです。
+- 公開保存のmaskラベルは既定の既知ラベルに限定します。top_daysの日付表示と曜日キーも既知形式だけを許可し、任意文字列による生値・名前の混入を防ぎます。
+- summary入力の欠測・非数・負数・人数の矛盾を観測0として扱いません。通常通知とsummaryの比率帯域は共有関数で下限閾値に従って分類します。
+- Slackでは初回/新規の重複掲載を避け、営業日・確認時刻・未取得・比較データ不足を明示します。`scripts/preview_notifications.py` は架空データの近似プレビュー専用です。
+- failure notification jobは専用script実行前に同じjob内でcheckoutします。この順序をworkflow checkerで検査します。
+- 取得失敗警告を送信済みの場合だけ、次の取得・解析成功時にメンションなしの復旧通知を一度送ります。通常通知の受付・保存後に復旧通知を送り、復旧だけの送信失敗はwarningをpendingに保ってStep Summaryへ明示します。workflowのstate commitへ進み、次回再試行します。取得予定のcron間隔は実際の観測間隔の保証ではありません。
+- 正式Webhookの全状態診断は `monitor-diagnostic --scenario all` で行います。通常通知・週次のデータ不足・取得失敗・観測なし・監視復旧の5状態を実装と同じbuilderで生成し、実予約取得・state更新は行いません。
 
 ## Public-safe contract
 - 公開リポジトリに永続化するのは `monitor_state.json`、`history_masked.json`、`summary_masked.json` のみです。

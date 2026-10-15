@@ -68,7 +68,7 @@ def stub_summary_dependencies(monkeypatch: pytest.MonkeyPatch, bundle: SummaryBu
 
     monkeypatch.setattr("watch_cheeks.check_robots_allow", lambda settings: True)
     monkeypatch.setattr("watch_cheeks.fetch_calendar_html", fake_fetch_calendar_html)
-    monkeypatch.setattr("watch_cheeks.parse_day_entries", lambda html, settings, reference_date: [])
+    monkeypatch.setattr("watch_cheeks.parse_day_entries", lambda html, settings, reference_date: bundle.period_days)
     monkeypatch.setattr("watch_cheeks.update_masked_history", lambda entries, settings: None)
     monkeypatch.setattr(
         "watch_cheeks.select_summary_bundle",
@@ -285,3 +285,13 @@ def test_summary_raises_fetch_failure_when_not_allowed(monkeypatch: pytest.Monke
 
     with pytest.raises(CalendarFetchError):
         summary(make_settings(), days=7, notify=False)
+
+
+def test_empty_calendar_writes_unavailable_marker_instead_of_zero(monkeypatch, tmp_path):
+    bundle = make_bundle()
+    stub_summary_dependencies(monkeypatch, bundle, {})
+    monkeypatch.setattr("watch_cheeks.parse_day_entries", lambda *args, **kwargs: [])
+    monkeypatch.setattr("watch_cheeks.update_masked_history", lambda *args, **kwargs: pytest.fail("must not update history"))
+    raw = tmp_path / "raw.json"
+    summary(make_settings(allow_fetch_failure=True), days=7, raw_output=raw, notify=False)
+    assert json.loads(raw.read_text())["fetch_status"] == "unavailable"

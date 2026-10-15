@@ -311,3 +311,10 @@ def test_derive_business_day_rollover_rules():
 
     assert day_before == date(2024, 1, 8)
     assert day_after == date(2024, 1, 9)
+
+
+@pytest.mark.parametrize("raw", ["2026-02-31", "2026-13-15", "2026/00/10", "2026年2月30日"])
+def test_invalid_explicit_date_is_ignored(raw):
+    from src.calendar_parser import parse_date_attribute
+
+    assert parse_date_attribute(raw) is None

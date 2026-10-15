@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -45,6 +46,7 @@ from src.masking import (
     MaskingConfig,
     RatioBand,
     load_masking_config,
+    ratio_band_label,
 )
 from src.notifications import (
     append_step_summary as _append_step_summary,
@@ -345,6 +347,8 @@ def log_parsing_snapshot(entries: Sequence[DailyEntry], logical_today: date) -> 
 
 def _format_business_label(target: date, logical_today: date) -> str:
     label = f"{target.month}/{target.day}({DOW_JP[_business_dow_label(target)]})"
+    if target == logical_today:
+        return f"今日: {label}"
     if target == logical_today + timedelta(days=1):
         return f"明日: {label}"
     if target > logical_today + timedelta(days=1):
@@ -359,19 +363,19 @@ def _format_stage_notification(entry: DailyEntry, notification_type: str, logica
     prefix = label_map.get(notification_type, "状態更新")
     label = _format_business_label(entry.business_day, logical_today)
     return (
-        f"[{prefix}] {label}: 単女{entry.single_female} 女{entry.female} "
-        f"/全{entry.total} ({percent}%)"
+        f"[{prefix}] {label}: 単独女性 {entry.single_female}人 · 女性 {entry.female}人 "
+        f"/ 合計 {entry.total}人 · 女性比率 {percent}%"
     )
 
 
 def _format_entry(entry: DailyEntry, logical_today: date, include_male: bool = False) -> str:
-    parts = [f"単女{entry.single_female}", f"女{entry.female}"]
+    parts = [f"単独女性 {entry.single_female}人", f"女性 {entry.female}人"]
     if include_male:
-        parts.append(f"男{entry.male}")
-    parts.append(f"全{entry.total}")
+        parts.append(f"男性 {entry.male}人")
+    parts.append(f"合計 {entry.total}人")
     percent = int(round(entry.ratio * 100))
     label = _format_business_label(entry.business_day, logical_today)
-    return f"{label}: {' '.join(parts)} ({percent}%)"
+    return f"{label}: {' · '.join(parts)} · 女性比率 {percent}%"
 
 
 def build_fallback_text(
@@ -503,8 +507,19 @@ def _build_slack_blocks(
     changed_counts: Sequence[DailyEntry],
     logical_today: date,
     settings: Settings,
+    *,
+    observed_at: str | None = None,
 ) -> List[Dict[str, Any]]:
-    blocks: List[Dict[str, Any]] = []
+    if not (stage_notifications or newly_met or changed_counts):
+        return []
+    observed = _format_public_state_datetime(observed_at or datetime.now(tz=JST).isoformat())
+    blocks: List[Dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": "Cheekschecker 予約状況の更新", "emoji": False}},
+        {"type": "context", "elements": [
+            {"type": "plain_text", "text": f"確認: {observed} / 営業日: {logical_today.isoformat()}"},
+            {"type": "plain_text", "text": "日付は曜日別の締め時刻で区切る営業日です。最新状況はカレンダーで確認してください。"},
+        ]},
+    ]
     if settings.ping_channel and stage_notifications:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "<!channel>"}})
     if stage_notifications:
@@ -546,7 +561,7 @@ def notify_slack(
     payload: Dict[str, Any],
     settings: Settings,
     *,
-    strict: bool = False,
+    strict: bool = True,
     fallback_text: Optional[str] = None,
 ) -> None:
     safe_fallback = str(
@@ -572,12 +587,7 @@ def _bin_value(value: int, bands: Sequence[Tuple[int, Optional[int], str]]) -> s
 
 
 def _bin_ratio(value: float, bands: Sequence[Tuple[float, Optional[float], str]]) -> str:
-    for low, high, label in bands:
-        if high is None and value >= low:
-            return label
-        if high is not None and low <= value <= high:
-            return label
-    return bands[-1][2]
+    return ratio_band_label(value, bands)
 
 
 def mask_entry(
@@ -922,6 +932,7 @@ def _build_fetch_failure_payload(
     operational_lines = [
         message,
         f"原因カテゴリ: {category}",
+        "最新状況は不明です。次回の監視実行で再試行します。急ぐ場合はカレンダーを直接確認してください。",
     ]
     if consecutive_runs is not None:
         operational_lines.append(f"連続失敗: {consecutive_runs}回")
@@ -974,6 +985,33 @@ def _build_fetch_failure_payload(
         "blocks": blocks,
     }
     return payload, fallback, sections
+
+
+def _build_fetch_recovery_payload(
+    settings: Settings,
+    *,
+    recovered_at: datetime,
+    consecutive_runs: int,
+) -> Tuple[Dict[str, Any], str, List[Tuple[str, List[str]]]]:
+    """Close a previously delivered outage warning without exposing observations."""
+    title = "Cheekschecker 監視が復旧しました"
+    lines = [
+        "カレンダーの取得・解析が再び成功しました。",
+        f"成功確認: {recovered_at.astimezone(JST).strftime('%Y-%m-%d %H:%M JST')}",
+        f"復旧前の連続失敗: {consecutive_runs}回",
+        "これは監視の復旧通知です。予約条件の達成通知とは別です。",
+    ]
+    fallback = title + "\n" + "\n".join(lines)
+    blocks: List[Dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": title}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
+    ]
+    if _is_valid_http_url(settings.target_url):
+        blocks.append({"type": "actions", "elements": [{
+            "type": "button", "text": {"type": "plain_text", "text": "カレンダーを開く"},
+            "url": settings.target_url,
+        }]})
+    return {"text": fallback, "blocks": blocks, "unfurl_links": False, "unfurl_media": False}, fallback, [("監視の復旧", lines)]
 
 
 def _build_summary_fetch_failure_raw_payload(
@@ -1153,6 +1191,7 @@ def _categorize_notifications(
     """
     if action:
         stage_notifications.append((entry, action))
+        return
 
     previous_met = bool(prev_state.get("met"))
     if entry.meets and not previous_met:
@@ -1193,7 +1232,8 @@ def process_notifications(
         Updated state dictionary
     """
     now_ts = int(time.time())
-    state = state if state is not None else load_state(logical_today)
+    # Keep the caller's state and persisted delivery markers unchanged on failure.
+    state = deepcopy(state if state is not None else load_state(logical_today))
     days_state = state.get("days")
     if not isinstance(days_state, dict):
         LOGGER.warning("Dropping malformed monitor days state: %s", type(days_state).__name__)
@@ -1230,8 +1270,6 @@ def process_notifications(
             changed_counts,
         )
 
-    save_state(state)
-
     step_sections = _build_public_safe_notification_sections(
         stage_notifications,
         newly_met,
@@ -1246,22 +1284,29 @@ def process_notifications(
         logical_today,
         settings,
     )
+    if not (stage_notifications or newly_met or changed_counts):
+        step_fallback = "取得・解析に成功しました。今日・明日の営業日に、新たな通知対象の変化はありません。"
     fallback = build_fallback_text(
         stage_notifications, newly_met, changed_counts, logical_today
     )
     append_step_summary(STEP_SUMMARY_TITLE_MONITOR, step_sections, step_fallback)
 
     if not (stage_notifications or newly_met or changed_counts):
+        save_state(state)
         LOGGER.info("No notifications to send for logical_today=%s", logical_today)
         return state
 
     blocks = _build_slack_blocks(
-        stage_notifications, newly_met, changed_counts, logical_today, settings
+        stage_notifications, newly_met, changed_counts, logical_today, settings,
+        observed_at=state.get("last_fetched_at"),
     )
-    payload = {"text": fallback, "blocks": blocks or None}
+    observed = _format_public_state_datetime(state.get("last_fetched_at") or datetime.now(tz=JST).isoformat())
+    payload = {"text": f"Cheekschecker 予約状況の更新\n確認: {observed}\n{fallback}", "blocks": blocks or None, "unfurl_links": False, "unfurl_media": False}
     if settings.ping_channel and not blocks:
         payload["text"] = f"<!channel> {payload['text']}"
     notify_slack(payload, settings, fallback_text=step_fallback)
+    save_state(state)
+    append_step_summary(STEP_SUMMARY_TITLE_MONITOR, [("通知結果", ["Slack への送信を受け付けました"])], "")
 
     return state
 
@@ -1295,7 +1340,7 @@ def send_monitor_slack_diagnostic(
 
     entry = _build_monitor_diagnostic_entry(logical_today)
     stage_notifications = [(entry, "initial")]
-    newly_met = [entry]
+    newly_met: list[DailyEntry] = []
     changed_counts: list[DailyEntry] = []
 
     diagnostic_lines = [
@@ -1341,11 +1386,40 @@ def send_monitor_slack_diagnostic(
             diagnostic_settings,
         )
     )
-    payload = {"text": fallback, "blocks": blocks}
+    payload = {"text": fallback, "blocks": blocks, "unfurl_links": False, "unfurl_media": False}
 
     append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, step_fallback)
     notify_slack(payload, diagnostic_settings, strict=True, fallback_text=step_fallback)
     LOGGER.info("Monitor Slack diagnostic notification sent")
+
+
+def send_slack_diagnostic_suite(settings: Settings) -> None:
+    """Exercise the production renderers with synthetic data and no state writes."""
+    send_monitor_slack_diagnostic(settings)
+    now = datetime.now(tz=JST)
+    today = derive_business_day(now, settings.rollover_hours)
+    sample = public_summary.DailyRecord(today, 3, 6, 15, 0.4)
+    dataset = public_summary.RawDataset("過去7日", 7, today, [sample], [])
+    context = public_summary.build_summary_context("weekly", dataset, {"days": {}})
+    if context is None:
+        raise RuntimeError("Synthetic summary context could not be built")
+    summary_payload = public_summary.build_slack_payload(context, "週次サマリー", logical_today=today)
+    failed_payload = public_summary.build_placeholder_summary_payload(
+        "Cheekschecker 週次サマリー", "外部サイト取得失敗", source_unavailable=True,
+    )
+    empty_payload = public_summary.build_placeholder_summary_payload(
+        "Cheekschecker 週次サマリー", "集計対象なし",
+    )
+    recovery_payload = _build_fetch_recovery_payload(settings, recovered_at=now, consecutive_runs=2)
+    for label, (payload, fallback, sections) in zip(
+        ("週次・データ不足", "取得失敗", "観測なし", "監視の復旧"),
+        (summary_payload, failed_payload, empty_payload, recovery_payload),
+    ):
+        banner = f"【診断】{label}\n実予約データではない synthetic payload です。監視状態は更新しません。"
+        payload["blocks"].insert(0, {"type": "section", "text": {"type": "mrkdwn", "text": banner}})
+        payload["text"] = banner + "\n" + fallback
+        append_step_summary(STEP_SUMMARY_TITLE_MONITOR, [("診断", [banner]), *sections], payload["text"])
+        notify_slack(payload, settings, strict=True)
 
 
 def select_summary_bundle(entries: Sequence[DailyEntry], *, logical_today: date, days: int) -> SummaryBundle:
@@ -1491,19 +1565,27 @@ def should_skip_by_http_headers(
         response.raise_for_status()
         etag = response.headers.get("ETag")
         last_modified = response.headers.get("Last-Modified")
-        same = False
-        if etag and prev_state.get("etag") and etag == prev_state.get("etag"):
-            same = True
-        if last_modified and prev_state.get("last_modified") and last_modified == prev_state.get("last_modified"):
-            same = True
+        # Prefer ETag when both responses provide it; an unchanged timestamp
+        # must not hide a changed content validator.
+        if etag and prev_state.get("etag"):
+            same = etag == prev_state.get("etag")
+        else:
+            same = bool(last_modified and last_modified == prev_state.get("last_modified"))
+        current_time = now or datetime.now(tz=JST)
+        last_fetched = _parse_state_datetime(prev_state.get("last_fetched_at"))
+        same_business_day = last_fetched is not None and derive_business_day(
+            last_fetched, settings.rollover_hours
+        ) == derive_business_day(current_time, settings.rollover_hours)
+        warning = public_state.sanitize_warning_throttle(prev_state.get("warning_throttle"))
+        has_fetch_failure = warning[MONITOR_FETCH_FAILURE_WARNING_KEY]["consecutive_runs"] > 0
         can_skip = same and _can_skip_for_cached_headers(
             prev_state,
-            now=now or datetime.now(tz=JST),
+            now=current_time,
             max_age_minutes=settings.head_skip_max_age_minutes,
-        )
+        ) and same_business_day and not has_fetch_failure
         if same and not can_skip:
             LOGGER.info(
-                "HEAD matched cached validators but fetch is forced because last successful fetch is stale or unknown"
+                "HEAD matched cached validators but fetch is required by freshness, business-day, or recovery policy"
             )
         LOGGER.info("HEAD check completed. skip=%s", can_skip)
         return can_skip, {"etag": etag, "last_modified": last_modified}
@@ -1526,25 +1608,26 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
     logical_today = derive_business_day(now, settings.rollover_hours)
     state = load_state(logical_today)
     skip, header_info = should_skip_by_http_headers(settings, state)
-    state.update(header_info)
     if skip:
         LOGGER.info("Skipping fetch because headers indicate no change")
         save_state(state)
         append_step_summary(
             STEP_SUMMARY_TITLE_MONITOR,
-            [("実行結果", ["前回取得から変更なし (ETag/Last-Modified)"])],
-            "前回取得から変更なし",
+            [("実行結果", ["更新ヘッダーが一致したため取得を省略 (ETag/Last-Modified)", f"前回成功取得: {_format_public_state_datetime(state.get('last_fetched_at'))}"])],
+            "更新ヘッダー一致のため取得を省略",
         )
         return
 
     try:
         html, _ = asyncio.run(fetch_calendar_html(settings))
+        entries = parse_day_entries(html, settings=settings, reference_date=logical_today)
+        if not entries:
+            raise CalendarFetchError("No recognizable calendar entries in source")
     except CalendarFetchError as exc:
-        if not settings.allow_fetch_failure:
-            raise
         detail = _short_error_message(exc)
         message = "外部サイト取得失敗のため今回の monitor はスキップしました"
         LOGGER.warning("%s detail=%s", message, detail)
+        previous_warning = dict(_warning_throttle_entry(state, MONITOR_FETCH_FAILURE_WARNING_KEY))
         should_warn, suppressed_runs = _record_warning_event(
             state,
             key=MONITOR_FETCH_FAILURE_WARNING_KEY,
@@ -1553,6 +1636,11 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
             throttle_minutes=settings.warning_throttle_minutes,
         )
         throttle_entry = _warning_throttle_entry(state, MONITOR_FETCH_FAILURE_WARNING_KEY)
+        if not settings.allow_fetch_failure:
+            throttle_entry["last_warned_at"] = previous_warning["last_warned_at"]
+            throttle_entry["suppressed_runs"] = previous_warning["suppressed_runs"]
+            save_state(state)
+            raise
         payload, fallback, sections = _build_fetch_failure_payload(
             title="Cheekschecker Monitor",
             message=message,
@@ -1564,12 +1652,19 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
             last_fetched_at=state.get("last_fetched_at"),
             detail_url=_github_actions_run_url_from_env(),
         )
-        save_state(state)
         if should_warn:
             if suppressed_runs:
                 sections.append(("警告抑制", [f"前回通知後に {suppressed_runs} 回の Slack 警告を抑制"]))
             append_step_summary(STEP_SUMMARY_TITLE_MONITOR, sections, fallback)
-            notify_slack(payload, settings)
+            try:
+                notify_slack(payload, settings)
+            except RuntimeError:
+                # Preserve the failure for recovery while leaving delivery
+                # markers untouched so the next warning can be attempted.
+                throttle_entry["last_warned_at"] = previous_warning["last_warned_at"]
+                throttle_entry["suppressed_runs"] = previous_warning["suppressed_runs"]
+                save_state(state)
+                raise
         else:
             sections.append(
                 (
@@ -1585,17 +1680,41 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
                 sections,
                 f"{fallback} (Slack warning suppressed)",
             )
+        save_state(state)
         return
-    state["last_fetched_at"] = datetime.now(tz=JST).isoformat()
-    _reset_warning_throttle(state, MONITOR_FETCH_FAILURE_WARNING_KEY)
+    recovered_at = datetime.now(tz=JST)
+    prior_warning = _warning_throttle_entry(state, MONITOR_FETCH_FAILURE_WARNING_KEY)
+    recovery_pending = bool(prior_warning["consecutive_runs"] and prior_warning["last_warned_at"])
+    state.update(header_info)
+    state["last_fetched_at"] = recovered_at.isoformat()
+    if not recovery_pending:
+        _reset_warning_throttle(state, MONITOR_FETCH_FAILURE_WARNING_KEY)
     if output_sanitized:
         output_sanitized.parent.mkdir(parents=True, exist_ok=True)
         output_sanitized.write_text(sanitize_html(html), encoding="utf-8")
         LOGGER.info("Sanitized HTML written to %s", output_sanitized)
 
-    entries = parse_day_entries(html, settings=settings, reference_date=logical_today)
     log_parsing_snapshot(entries, logical_today)
-    process_notifications(entries, settings=settings, logical_today=logical_today, state=state)
+    processed_state = process_notifications(entries, settings=settings, logical_today=logical_today, state=state)
+    if recovery_pending:
+        # Deliver ordinary changes first. Keep the warning pending in that
+        # saved snapshot so a failed recovery send is retried without HEAD skip.
+        recovery_payload, recovery_fallback, recovery_sections = _build_fetch_recovery_payload(
+            settings, recovered_at=recovered_at, consecutive_runs=prior_warning["consecutive_runs"],
+        )
+        try:
+            notify_slack(recovery_payload, settings, strict=True)
+        except RuntimeError:
+            # Let the workflow commit accepted ordinary delivery markers. A
+            # fatal recovery-only failure would discard this runner's snapshot.
+            LOGGER.warning("Recovery notification failed; delivery remains pending")
+            append_step_summary(STEP_SUMMARY_TITLE_MONITOR, [("復旧通知の送信失敗", [
+                "通常通知の受付状態を保存しました。復旧通知は次回の監視実行で再試行します。",
+            ])], "復旧通知: 送信失敗・再試行待ち")
+        else:
+            append_step_summary(STEP_SUMMARY_TITLE_MONITOR, recovery_sections, recovery_fallback)
+            _reset_warning_throttle(processed_state, MONITOR_FETCH_FAILURE_WARNING_KEY)
+            save_state(processed_state)
     update_masked_history(entries, settings=settings)
 
 
@@ -1645,6 +1764,9 @@ def summary(
 
     try:
         html, _ = asyncio.run(fetch_calendar_html(settings))
+        entries = parse_day_entries(html, settings=settings, reference_date=logical_today)
+        if not entries:
+            raise CalendarFetchError("No recognizable calendar entries in source")
     except CalendarFetchError as exc:
         if not settings.allow_fetch_failure:
             raise
@@ -1682,7 +1804,6 @@ def summary(
             append_step_summary(summary_title, sections, fallback_text)
             notify_slack(payload, settings)
         return
-    entries = parse_day_entries(html, settings=settings, reference_date=logical_today)
     update_masked_history(entries, settings=settings)
     bundle = select_summary_bundle(entries, logical_today=logical_today, days=days)
     raw_payload = _build_raw_summary_payload(bundle, logical_today=logical_today, days=days)
@@ -1742,9 +1863,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     monitor_parser = subparsers.add_parser("monitor", help="Run monitoring notifications")
     monitor_parser.add_argument("--sanitized-output", type=Path, help="Path to save sanitized HTML")
 
-    subparsers.add_parser(
+    diagnostic_parser = subparsers.add_parser(
         "monitor-diagnostic",
         help="Send a synthetic public-safe monitor Slack diagnostic",
+    )
+    diagnostic_parser.add_argument(
+        "--scenario", choices=("monitor", "all"),
+        default=os.getenv("MONITOR_DIAGNOSTIC_SCENARIO", "monitor"),
+        help="Send one monitor sample or all notification states without changing live state",
     )
 
     summary_parser = subparsers.add_parser("summary", help="Send weekly/monthly summary")
@@ -1768,7 +1894,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         sanitized_path = getattr(args, "sanitized_output", None)
         monitor(settings, output_sanitized=sanitized_path)
     elif args.command == "monitor-diagnostic":
-        send_monitor_slack_diagnostic(settings)
+        if args.scenario == "all":
+            send_slack_diagnostic_suite(settings)
+        else:
+            send_monitor_slack_diagnostic(settings)
     elif args.command == "summary":
         raw_output = getattr(args, "raw_output", None)
         summary(settings, days=args.days, raw_output=raw_output, notify=not args.no_notify)

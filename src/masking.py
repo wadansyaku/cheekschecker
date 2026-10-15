@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple, TypeVar
@@ -17,6 +18,17 @@ TBandValue = TypeVar("TBandValue", int, float)
 Band = Tuple[int | float, Optional[int | float], str]
 CountBand = Tuple[int, Optional[int], str]
 RatioBand = Tuple[float, Optional[float], str]
+
+
+def ratio_band_label(value: float, bands: Sequence[RatioBand]) -> str:
+    """Use lower thresholds so fractional percentages cannot fall into gaps."""
+    if not math.isfinite(value) or not bands:
+        raise ValueError("Ratio and masking bands must be valid")
+    normalized = max(0.0, min(1.0, value))
+    for low, _, label in reversed(bands):
+        if normalized >= low:
+            return label
+    return bands[0][2]
 
 
 @dataclass(frozen=True)

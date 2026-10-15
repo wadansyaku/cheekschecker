@@ -104,6 +104,8 @@ jobs:
         run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json --no-notify
 
       - name: Commit public-safe archives
+        env:
+          WRITER_REF: ${{ github.ref_name }}
         run: |
           git config user.email "github-actions@github.com"
           git config user.name "github-actions"
@@ -114,7 +116,7 @@ jobs:
             exit 0
           fi
           git commit -m "chore: update weekly summary"
-          git push origin HEAD:${{ github.ref_name }}
+          python scripts/ci/push_with_retry.py "$WRITER_REF"
 
       - name: Notify weekly summary
         env:
@@ -129,6 +131,9 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Checkout failure notification script
+        uses: actions/checkout@v6
+
       - name: Notify Slack on failure
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

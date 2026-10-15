@@ -57,7 +57,7 @@ def test_monitor_writes_nested_sanitized_output(monkeypatch: pytest.MonkeyPatch,
         "watch_cheeks.should_skip_by_http_headers", lambda settings, state: (False, {})
     )
     monkeypatch.setattr(
-        "watch_cheeks.parse_day_entries", lambda html, settings, reference_date: []
+        "watch_cheeks.parse_day_entries", lambda html, settings, reference_date: [watch_cheeks._build_monitor_diagnostic_entry(reference_date)]
     )
     monkeypatch.setattr("watch_cheeks.log_parsing_snapshot", lambda entries, logical_today: None)
     monkeypatch.setattr(
@@ -91,7 +91,7 @@ def test_monitor_persists_etag_and_skips_second_run(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", monitor_state_path)
     monkeypatch.setattr("watch_cheeks.check_robots_allow", lambda settings: True)
     monkeypatch.setattr("watch_cheeks.fetch_calendar_html", fake_fetch_calendar_html)
-    monkeypatch.setattr("watch_cheeks.parse_day_entries", lambda html, settings, reference_date: [])
+    monkeypatch.setattr("watch_cheeks.parse_day_entries", lambda html, settings, reference_date: [watch_cheeks._build_monitor_diagnostic_entry(reference_date)])
     monkeypatch.setattr("watch_cheeks.log_parsing_snapshot", lambda entries, logical_today: None)
     monkeypatch.setattr(
         "watch_cheeks.process_notifications",
@@ -382,7 +382,8 @@ def test_process_notifications_step_summary_uses_public_safe_bands(
     assert "全<10" in summary_text
     assert "単女4 女6" not in summary_text
     assert "/全9" not in summary_text
-    assert "単女4 女6" in events["notify"][0]["text"]
+    assert "単独女性 4人 · 女性 6人" in events["notify"][0]["text"]
+    assert "単独女性 4人" not in summary_text
 
 
 def test_notify_slack_can_use_public_safe_log_fallback(
@@ -615,3 +616,208 @@ def test_head_skip_requires_recent_successful_fetch(monkeypatch: pytest.MonkeyPa
     assert missing_fetch_skip is False
     assert recent_fetch_skip is True
     assert stale_fetch_skip is False
+
+
+@pytest.mark.parametrize(
+    "headers,previous,expected",
+    [
+        ({"ETag": "new", "Last-Modified": "same"}, {"etag": "old", "last_modified": "same"}, False),
+        ({"ETag": "same", "Last-Modified": "new"}, {"etag": "same", "last_modified": "old"}, True),
+        ({"Last-Modified": "same"}, {"last_modified": "same"}, True),
+    ],
+)
+def test_head_validator_precedence(monkeypatch, headers, previous, expected):
+    class Response:
+        def raise_for_status(self):
+            pass
+
+    response = Response()
+    response.headers = headers
+    monkeypatch.setattr(watch_cheeks.requests, "head", lambda *args, **kwargs: response)
+    previous["last_fetched_at"] = "2024-01-16T12:00:00+09:00"
+    skip, _ = watch_cheeks.should_skip_by_http_headers(
+        make_settings(), previous, now=datetime.fromisoformat("2024-01-16T12:10:00+09:00")
+    )
+    assert skip is expected
+
+
+@pytest.mark.parametrize("reason", ["business_day", "fetch_failure"])
+def test_same_headers_do_not_skip_business_day_change_or_recovery(monkeypatch, reason):
+    class Response:
+        def __init__(self):
+            self.headers = {"ETag": "same"}
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(watch_cheeks.requests, "head", lambda *args, **kwargs: Response())
+    state = {"etag": "same", "last_fetched_at": "2024-01-16T04:59:00+09:00"}
+    if reason == "fetch_failure":
+        state["last_fetched_at"] = "2024-01-16T05:00:00+09:00"
+        state["warning_throttle"] = {"monitor_fetch_failure": {"consecutive_runs": 1}}
+    skip, _ = watch_cheeks.should_skip_by_http_headers(
+        make_settings(), state, now=datetime.fromisoformat("2024-01-16T05:01:00+09:00")
+    )
+    assert skip is False
+
+
+@pytest.mark.parametrize("empty_parse", [False, True])
+@pytest.mark.parametrize("allow_failure", [False, True])
+def test_failed_source_does_not_commit_new_validators_or_freshness(monkeypatch, empty_parse, allow_failure):
+    original = {"days": {}, "etag": "old", "last_fetched_at": "2024-01-15T12:00:00+09:00"}
+    saved = []
+
+    async def fetch(settings):
+        if not empty_parse:
+            raise CalendarFetchError("unavailable")
+        return "<html>maintenance</html>", "http://example.com"
+
+    monkeypatch.setattr(watch_cheeks, "check_robots_allow", lambda settings: True)
+    monkeypatch.setattr(watch_cheeks, "load_state", lambda day: dict(original))
+    monkeypatch.setattr(watch_cheeks, "should_skip_by_http_headers", lambda settings, state: (False, {"etag": "new"}))
+    monkeypatch.setattr(watch_cheeks, "fetch_calendar_html", fetch)
+    monkeypatch.setattr(watch_cheeks, "parse_day_entries", lambda *args, **kwargs: [])
+    monkeypatch.setattr(watch_cheeks, "save_state", lambda state: saved.append(state))
+    monkeypatch.setattr(watch_cheeks, "notify_slack", lambda *args, **kwargs: None)
+    monkeypatch.setattr(watch_cheeks, "update_masked_history", lambda *args, **kwargs: pytest.fail("must not update history"))
+    if allow_failure:
+        monitor(make_settings(allow_fetch_failure=True))
+    else:
+        with pytest.raises(CalendarFetchError):
+            monitor(make_settings(allow_fetch_failure=False))
+    assert saved[0]["etag"] == "old"
+    assert saved[0]["last_fetched_at"] == original["last_fetched_at"]
+    assert saved[0]["warning_throttle"]["monitor_fetch_failure"]["consecutive_runs"] == 1
+
+
+def test_failed_warning_delivery_does_not_throttle_the_next_attempt(monkeypatch):
+    saved = []
+
+    async def fetch(settings):
+        raise CalendarFetchError("unavailable")
+
+    def fail_send(*args, **kwargs):
+        raise RuntimeError("Slack delivery failed")
+
+    monkeypatch.setattr(watch_cheeks, "check_robots_allow", lambda settings: True)
+    monkeypatch.setattr(watch_cheeks, "load_state", lambda day: {"days": {}})
+    monkeypatch.setattr(watch_cheeks, "should_skip_by_http_headers", lambda settings, state: (False, {}))
+    monkeypatch.setattr(watch_cheeks, "fetch_calendar_html", fetch)
+    monkeypatch.setattr(watch_cheeks, "save_state", lambda state: saved.append(state))
+    monkeypatch.setattr(watch_cheeks, "notify_slack", fail_send)
+    with pytest.raises(RuntimeError, match="Slack delivery failed"):
+        monitor(make_settings(allow_fetch_failure=True))
+    warning = saved[0]["warning_throttle"]["monitor_fetch_failure"]
+    assert warning["last_warned_at"] is None
+    assert warning["consecutive_runs"] == 1
+    assert warning["suppressed_runs"] == 0
+
+
+def _prepare_outage_recovery(monkeypatch, tmp_path, *, warning_delivered=True, meets=False):
+    settings = make_settings()
+    today = watch_cheeks.derive_business_day(datetime.now(tz=watch_cheeks.JST), settings.rollover_hours)
+    entry = replace(watch_cheeks._build_monitor_diagnostic_entry(today),
+                    meets=meets, single_female=3, female=3, male=7, total=10, ratio=0.3)
+    monkeypatch.setattr(watch_cheeks, "MONITOR_STATE_PATH", tmp_path / "monitor_state.json")
+    watch_cheeks.save_state({
+        "days": {}, "warning_throttle": {"monitor_fetch_failure": {
+            "consecutive_runs": 2,
+            "last_warned_at": "2026-10-01T12:00:00+09:00" if warning_delivered else None,
+        }},
+    })
+
+    async def fetch(settings):
+        return "synthetic source", "https://example.com"
+
+    monkeypatch.setattr(watch_cheeks, "check_robots_allow", lambda settings: True)
+    monkeypatch.setattr(watch_cheeks, "should_skip_by_http_headers", lambda settings, state: (False, {}))
+    monkeypatch.setattr(watch_cheeks, "fetch_calendar_html", fetch)
+    monkeypatch.setattr(watch_cheeks, "parse_day_entries", lambda *args, **kwargs: [entry])
+    monkeypatch.setattr(watch_cheeks, "update_masked_history", lambda *args, **kwargs: None)
+    return settings, today
+
+
+@pytest.mark.parametrize("warning_delivered", [False, True])
+def test_monitor_closes_only_delivered_outage_warning_once(monkeypatch, tmp_path, warning_delivered):
+    settings, today = _prepare_outage_recovery(monkeypatch, tmp_path, warning_delivered=warning_delivered)
+    sent = []
+    monkeypatch.setattr(watch_cheeks, "notify_slack", lambda payload, settings, **kwargs: sent.append(payload))
+    monitor(settings)
+    monitor(settings)
+    assert len(sent) == int(warning_delivered)
+    if sent:
+        assert "監視が復旧" in sent[0]["text"]
+        assert "<!channel>" not in json.dumps(sent[0])
+        assert "単女" not in sent[0]["text"]
+    assert watch_cheeks.load_state(today)["warning_throttle"]["monitor_fetch_failure"]["consecutive_runs"] == 0
+
+
+def test_ordinary_notification_failure_does_not_send_recovery_or_advance_freshness(monkeypatch, tmp_path):
+    settings, today = _prepare_outage_recovery(monkeypatch, tmp_path, meets=True)
+    sent = []
+
+    def fail(payload, settings, **kwargs):
+        sent.append(payload)
+        raise RuntimeError("notification failed")
+
+    monkeypatch.setattr(watch_cheeks, "notify_slack", fail)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="notification failed"):
+            monitor(settings)
+    assert len(sent) == 2
+    assert all("監視が復旧" not in payload["text"] for payload in sent)
+    state = watch_cheeks.load_state(today)
+    assert state["warning_throttle"]["monitor_fetch_failure"]["consecutive_runs"] == 2
+    assert not state.get("last_fetched_at")
+    assert state["days"] == {}
+
+
+def test_failed_recovery_retries_without_repeating_accepted_ordinary_notification(monkeypatch, tmp_path):
+    settings, today = _prepare_outage_recovery(monkeypatch, tmp_path, meets=True)
+    sent = []
+
+    def send(payload, settings, **kwargs):
+        sent.append(payload)
+        if "監視が復旧" in payload["text"] and len(sent) == 2:
+            raise RuntimeError("recovery failed")
+
+    monkeypatch.setattr(watch_cheeks, "notify_slack", send)
+    # Recovery-only failure must let the workflow's success-gated commit run.
+    # It retains the pending warning without losing accepted ordinary markers.
+    monitor(settings)
+    state = watch_cheeks.load_state(today)
+    assert state["warning_throttle"]["monitor_fetch_failure"]["consecutive_runs"] == 2
+    assert state["days"][today.isoformat()]["stage"] == "initial"
+    assert state["last_fetched_at"]
+    monitor(settings)
+    monitor(settings)
+    assert len(sent) == 3
+    assert "監視が復旧" not in sent[0]["text"]
+    assert all("監視が復旧" in payload["text"] for payload in sent[1:])
+    assert watch_cheeks.load_state(today)["warning_throttle"]["monitor_fetch_failure"]["consecutive_runs"] == 0
+
+
+def test_all_diagnostics_use_production_builders_without_fetch_or_state(monkeypatch):
+    sent = []
+    forbidden = lambda *args, **kwargs: pytest.fail("diagnostic must not access live data")
+    for name in ("load_state", "save_state", "load_masked_history", "update_masked_history", "fetch_calendar_html"):
+        monkeypatch.setattr(watch_cheeks, name, forbidden)
+    monkeypatch.setattr(watch_cheeks, "notify_slack", lambda payload, settings, **kwargs: sent.append(payload))
+    watch_cheeks.send_slack_diagnostic_suite(make_settings(ping_channel=True))
+    assert len(sent) == 5
+    rendered = json.dumps(sent, ensure_ascii=False)
+    assert rendered.count("【診断】") >= 5
+    assert "synthetic payload" in rendered
+    assert "<!channel>" not in rendered
+    assert "比較データ不足" in rendered
+    assert "未取得" in rendered
+    assert "観測なし" in rendered
+    assert "監視が復旧" in rendered
+    assert "新規成立日" not in json.dumps(sent[0], ensure_ascii=False)
+
+
+def test_diagnostic_scenario_cli_is_bounded():
+    parser = watch_cheeks.build_arg_parser()
+    assert parser.parse_args(["monitor-diagnostic", "--scenario", "all"]).scenario == "all"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["monitor-diagnostic", "--scenario", "live"])

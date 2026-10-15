@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts.ci.check_public_artifacts import validate_public_artifacts
+from src import public_state
 
 
 def _write(path: Path, data: dict) -> None:
@@ -117,3 +120,44 @@ def test_validate_public_artifacts_rejects_raw_keys_and_secrets(tmp_path: Path) 
 
     assert any("forbidden public artifact key" in error for error in errors)
     assert any("not normalized" in error for error in errors)
+
+
+@pytest.mark.parametrize("unsafe_label", ["Alice", "女性13人", "13/27", "50.25 %"])
+def test_public_artifact_checker_rejects_disguised_raw_history_labels(
+    tmp_path: Path, unsafe_label: str,
+) -> None:
+    history = tmp_path / "history_masked.json"
+    _write(
+        history,
+        {"days": {"2026-05-15": {
+            "single": "3-4", "female": unsafe_label, "total": "10-19", "ratio": "50±",
+        }}},
+    )
+
+    errors = validate_public_artifacts((history,))
+
+    assert any("not normalized by sanitize_masked_days" in error for error in errors)
+
+
+@pytest.mark.parametrize("unsafe_field", ["stat", "day_label", "weekday"])
+def test_public_artifact_checker_rejects_free_text_summary_fields(
+    tmp_path: Path, unsafe_field: str,
+) -> None:
+    summary = tmp_path / "summary_masked.json"
+    entry = {"single": "3-4", "female": "5-6", "total": "10-19", "ratio": "50±"}
+    payload = public_state.sanitize_summary_store({"weekly": {
+        "stats": {"female": {"average": "-"}},
+        "top_days": [{"label": "05/15(月)", **entry}],
+        "weekday_profile": {"月": entry},
+    }})
+    if unsafe_field == "stat":
+        payload["weekly"]["stats"]["female"]["average"] = "女性13人"
+    elif unsafe_field == "day_label":
+        payload["weekly"]["top_days"][0]["label"] = "Alice 05/15(月)"
+    else:
+        payload["weekly"]["weekday_profile"]["Alice"] = entry
+    _write(summary, payload)
+
+    errors = validate_public_artifacts((summary,))
+
+    assert any("not normalized by sanitize_summary_store" in error for error in errors)

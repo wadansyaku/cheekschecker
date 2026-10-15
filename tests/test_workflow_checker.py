@@ -20,6 +20,8 @@ def _notify_failure_step(
         "    permissions:",
         "      contents: read",
         "    steps:",
+        "      - name: Checkout failure notification script",
+        "        uses: actions/checkout@v6",
         "      - name: Notify Slack on failure",
         "        env:",
         "          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}",
@@ -84,9 +86,11 @@ def _summary_weekly_workflow_lines(
         "      - name: Generate weekly summary artifact",
         "        run: python summarize.py --period weekly --raw-data weekly_summary_raw.json --history history_masked.json --output summary_masked.json --no-notify",
         "      - name: Commit public-safe archives",
+        "        env:",
+        "          WRITER_REF: ${{ github.ref_name }}",
         "        run: |",
         "          git add monitor_state.json history_masked.json summary_masked.json",
-        "          git push origin HEAD:${{ github.ref_name }}",
+        '          python scripts/ci/push_with_retry.py "$WRITER_REF"',
         "      - name: Notify weekly summary",
         "        env:",
         "          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}",
@@ -168,9 +172,11 @@ def _monitor_workflow_lines(
         "        run: python watch_cheeks.py monitor-diagnostic",
         "      - name: Commit public-safe monitor artifacts",
         "        if: github.event_name != 'workflow_dispatch' || !inputs.send_monitor_diagnostic",
+        "        env:",
+        "          WRITER_REF: ${{ github.ref_name }}",
         "        run: |",
         "          git add monitor_state.json history_masked.json",
-        "          git push origin HEAD:${{ github.ref_name }}",
+        '          python scripts/ci/push_with_retry.py "$WRITER_REF"',
     ] + _notify_failure_step("Monitor Calendar")
 
 
@@ -357,6 +363,40 @@ def test_notify_failure_job_requires_needs_failure_and_timeout() -> None:
     assert any("timeout-minutes: 3" in error for error in errors)
 
 
+def test_notify_failure_requires_checkout_in_its_own_job() -> None:
+    lines = _monitor_workflow_lines()
+    checkout_index = lines.index("      - name: Checkout failure notification script")
+    checkout = lines[checkout_index : checkout_index + 2]
+    lines = lines[:checkout_index] + lines[checkout_index + 2 :]
+    monitor_steps_index = lines.index("    steps:") + 1
+    lines = lines[:monitor_steps_index] + checkout + lines[monitor_steps_index:]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
+
+    assert any("check out its payload script before Slack notification" in error for error in errors)
+
+
+def test_notify_failure_checkout_must_precede_payload_script() -> None:
+    lines = _monitor_workflow_lines()
+    checkout_index = lines.index("      - name: Checkout failure notification script")
+    checkout = lines[checkout_index : checkout_index + 2]
+    lines = lines[:checkout_index] + lines[checkout_index + 2 :] + checkout
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/monitor.yml"), lines)
+
+    assert any("check out its payload script before Slack notification" in error for error in errors)
+
+
+def test_notify_failure_missing_checkout_is_rejected() -> None:
+    lines = _summary_weekly_workflow_lines()
+    checkout_index = lines.index("      - name: Checkout failure notification script")
+    lines = lines[:checkout_index] + lines[checkout_index + 2 :]
+
+    errors = validate_public_safe_workflow_contract(Path(".github/workflows/summary_weekly.yml"), lines)
+
+    assert any("check out its payload script before Slack notification" in error for error in errors)
+
+
 def test_notify_failure_curl_failure_must_fail_fast() -> None:
     lines = [line for line in _monitor_workflow_lines() if line.strip() != "exit 1"]
 
@@ -404,7 +444,7 @@ def test_notify_failure_rejects_inline_python_payload_generation() -> None:
 
 def test_writer_push_target_must_use_current_ref() -> None:
     lines = [
-        line.replace("git push origin HEAD:${{ github.ref_name }}", "git push origin main")
+        line.replace("WRITER_REF: ${{ github.ref_name }}", "WRITER_REF: main")
         for line in _summary_weekly_workflow_lines()
     ]
 
@@ -414,6 +454,38 @@ def test_writer_push_target_must_use_current_ref() -> None:
     )
 
     assert any("push to the current ref" in error for error in errors)
+
+
+def test_writer_push_must_use_bounded_retry_helper() -> None:
+    lines = [
+        line.replace(
+            'python scripts/ci/push_with_retry.py "$WRITER_REF"',
+            "git push origin HEAD:${{ github.ref_name }}",
+        )
+        for line in _summary_weekly_workflow_lines()
+    ]
+
+    errors = validate_public_safe_workflow_contract(
+        Path(".github/workflows/summary_weekly.yml"), lines
+    )
+
+    assert any("bounded push retry helper" in error for error in errors)
+
+
+def test_writer_push_helper_failure_must_not_be_ignored() -> None:
+    lines = [
+        line.replace(
+            'python scripts/ci/push_with_retry.py "$WRITER_REF"',
+            'python scripts/ci/push_with_retry.py "$WRITER_REF" || true',
+        )
+        for line in _summary_weekly_workflow_lines()
+    ]
+
+    errors = validate_public_safe_workflow_contract(
+        Path(".github/workflows/summary_weekly.yml"), lines
+    )
+
+    assert any("bounded push retry helper" in error for error in errors)
 
 
 def test_workflows_using_javascript_actions_require_node24_opt_in() -> None:

@@ -29,6 +29,11 @@ SUMMARY_PERIOD_KEYS = {"weekly", "monthly"}
 SUMMARY_STATUS_VALUES = {"ok", "no-data", "source-unavailable"}
 SUMMARY_TREND_VALUES = {"up", "down", "flat", "unknown"}
 SUMMARY_SOURCE_VALUES = {"raw", "masked"}
+SUMMARY_WEEKDAY_VALUES = set("月火水木金土日")
+SUMMARY_DAY_LABEL_RE = re.compile(
+    r"^(?:(?P<month>0?[1-9]|1[0-2])/(?P<month_day>0?[1-9]|[12][0-9]|3[01])"
+    r"|(?P<day>0?[1-9]|[12][0-9]|3[01])日)\([月火水木金土日]\)$"
+)
 SUMMARY_METRIC_KEYS = ("single", "female", "total", "ratio")
 SUMMARY_STAT_KEYS = ("average", "median", "max")
 SUMMARY_COVERAGE_KEYS = (
@@ -173,18 +178,29 @@ def _safe_text(value: Any, *, max_length: int = 80) -> Optional[str]:
     return text
 
 
-def _looks_like_raw_numeric_label(text: str) -> bool:
-    return bool(re.fullmatch(r"\d+(?:\.\d+)?%?", text))
-
-
-def _sanitize_mask_label(value: Any) -> Optional[str]:
+def _sanitize_mask_label(value: Any, *, allow_missing: bool = False) -> Optional[str]:
     text = _safe_text(value, max_length=32)
     if text is None:
         return None
     if text in DEFAULT_SAFE_MASK_LABELS:
         return text
-    if _looks_like_raw_numeric_label(text):
+    if allow_missing and text == "-":
+        return text
+    return None
+
+
+def _sanitize_day_label(value: Any) -> str | None:
+    text = _safe_text(value, max_length=40)
+    if text is None:
         return None
+    match = SUMMARY_DAY_LABEL_RE.fullmatch(text)
+    if match is None:
+        return None
+    if match.group("month") is not None:
+        try:
+            date(2000, int(match.group("month")), int(match.group("month_day")))
+        except ValueError:
+            return None
     return text
 
 
@@ -226,7 +242,7 @@ def _sanitize_stats(value: Any) -> Dict[str, Dict[str, str]]:
             continue
         metric_payload: Dict[str, str] = {}
         for stat_key in SUMMARY_STAT_KEYS:
-            label = _sanitize_mask_label(raw_metric.get(stat_key))
+            label = _sanitize_mask_label(raw_metric.get(stat_key), allow_missing=True)
             if label is not None:
                 metric_payload[stat_key] = label
         if metric_payload:
@@ -241,7 +257,7 @@ def _sanitize_top_days(value: Any) -> list[Dict[str, str]]:
     for item in value[:10]:
         if not isinstance(item, dict):
             continue
-        label = _safe_text(item.get("label"), max_length=40)
+        label = _sanitize_day_label(item.get("label"))
         if label is None:
             continue
         payload: Dict[str, str] = {"label": label}
@@ -278,7 +294,7 @@ def _sanitize_weekday_profile(value: Any) -> Dict[str, Dict[str, str]]:
         return sanitized
     for raw_key, raw_profile in value.items():
         key = _safe_text(raw_key, max_length=8)
-        if key is None or not isinstance(raw_profile, dict):
+        if key is None or key not in SUMMARY_WEEKDAY_VALUES or not isinstance(raw_profile, dict):
             continue
         profile: Dict[str, str] = {}
         complete = True

@@ -111,6 +111,9 @@ def _normalize_button(element: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(value, str) and value.strip():
         normalized["value"] = _truncate_text(_clean_text(value), 2000)
 
+    if element.get("style") in ("primary", "danger"):
+        normalized["style"] = element["style"]
+
     if "url" not in normalized and "action_id" not in normalized and "value" not in normalized:
         return None
     return normalized

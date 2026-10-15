@@ -51,7 +51,7 @@ def send_slack_message(
     payload: Dict[str, Any],
     fallback_text: str,
     *,
-    strict: bool = False,
+    strict: bool = True,
 ) -> None:
     _send_slack_message(
         webhook,
@@ -106,7 +106,7 @@ def handle_source_unavailable(
     if detail:
         message = f"{message} ({detail})"
     title = f"Cheekschecker {period_title}"
-    payload, fallback, sections = build_placeholder_summary_payload(title, message)
+    payload, fallback, sections = build_placeholder_summary_payload(title, message, source_unavailable=True)
     append_step_summary(summary_title, sections, fallback)
     _maybe_send_slack(webhook, payload, fallback, notify=notify)
 

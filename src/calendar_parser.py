@@ -345,7 +345,10 @@ def parse_date_attribute(raw: str) -> Optional[date]:
         match = re.search(r"(\d{4})\D(\d{1,2})\D(\d{1,2})", cleaned)
         if match:
             year, month, day = map(int, match.groups())
-            return date(year, month, day)
+            try:
+                return date(year, month, day)
+            except ValueError:
+                return None
     return None
 
 

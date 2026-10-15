@@ -10,6 +10,14 @@ on:
         required: false
         default: false
         type: boolean
+      diagnostic_scenario:
+        description: 'Synthetic diagnostic: monitor only or all five notification states'
+        required: false
+        default: all
+        type: choice
+        options:
+          - monitor
+          - all
 
 permissions:
   contents: read
@@ -133,10 +141,13 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           PING_CHANNEL: '0'
+          MONITOR_DIAGNOSTIC_SCENARIO: ${{ inputs.diagnostic_scenario || 'monitor' }}
         run: python watch_cheeks.py monitor-diagnostic
 
       - name: Commit public-safe monitor artifacts
         if: github.event_name != 'workflow_dispatch' || !inputs.send_monitor_diagnostic
+        env:
+          WRITER_REF: ${{ github.ref_name }}
         run: |
           git config user.email "github-actions@github.com"
           git config user.name "github-actions"
@@ -147,7 +158,7 @@ jobs:
             exit 0
           fi
           git commit -m "chore: update monitor state"
-          git push origin HEAD:${{ github.ref_name }}
+          python scripts/ci/push_with_retry.py "$WRITER_REF"
 
   notify-failure:
     runs-on: ubuntu-latest
@@ -157,6 +168,9 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Checkout failure notification script
+        uses: actions/checkout@v6
+
       - name: Notify Slack on failure
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

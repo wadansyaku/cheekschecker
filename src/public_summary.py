@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import statistics
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from zoneinfo import ZoneInfo
 
-from src.masking import DEFAULT_MASKING_CONFIG, CountBand, MaskingConfig, RatioBand
+from src.masking import DEFAULT_MASKING_CONFIG, CountBand, MaskingConfig, RatioBand, ratio_band_label
 
 
 LOGGER = logging.getLogger(__name__)
@@ -162,15 +163,23 @@ def _record_from_dict(data: Dict[str, Any]) -> Optional[DailyRecord]:
     business_day = _parse_iso_date(data.get("date"))
     if business_day is None:
         return None
-    single = max(0, _coerce_int(data.get("single_female")))
-    female = max(0, _coerce_int(data.get("female")))
-    total = max(0, _coerce_int(data.get("total"), female))
-    if total <= 0:
-        total = max(female, single)
-    ratio = _coerce_float(data.get("ratio"), 0.0)
-    if ratio <= 0 and total:
-        ratio = female / total
-    ratio = max(0.0, min(1.0, ratio))
+    # A missing/invalid measurement is not an observed zero.
+    counts = []
+    for key in ("single_female", "female", "total"):
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(number) or number < 0 or not number.is_integer():
+            return None
+        counts.append(int(number))
+    single, female, total = counts
+    if not single <= female <= total:
+        return None
+    ratio = female / total if total else 0.0
     return DailyRecord(
         business_day=business_day,
         single_female=single,
@@ -225,13 +234,7 @@ def _bin_value(value: float, bands: Sequence[Tuple[int, Optional[int], str]]) ->
 
 
 def _bin_ratio(value: float, bands: Sequence[Tuple[float, Optional[float], str]]) -> str:
-    normalized = max(0.0, min(1.0, value))
-    for low, high, label in bands:
-        if high is None and normalized >= low:
-            return label
-        if high is not None and low <= normalized <= high:
-            return label
-    return bands[-1][2]
+    return ratio_band_label(value, bands)
 
 
 def _mask_labels_for_raw(record: DailyRecord, config: MaskingConfig) -> Dict[str, str]:
@@ -549,7 +552,7 @@ def _format_date_range(start: date, end: date) -> str:
 
 def _format_latest_field(latest: SummaryRecord) -> List[str]:
     latest_label = f"{latest.business_day.month:02d}/{latest.business_day.day:02d}({_weekday_label(latest.weekday)})"
-    source_label = "現run" if latest.source == "raw" else "masked補完"
+    source_label = "今回の取得" if latest.source == "raw" else "保存履歴から補完"
     return [
         latest_label,
         f"単女{latest.single_label} 女{latest.female_label}/全{latest.total_label}",
@@ -589,11 +592,11 @@ def _format_top_days_section(top_days: Sequence[SummaryRecord]) -> List[str]:
 
 def _format_trend_value(direction: str) -> str:
     return {
-        "up": "↗",
-        "down": "↘",
-        "flat": "→",
-        "unknown": "?"
-    }.get(direction, "?")
+        "up": "増加",
+        "down": "減少",
+        "flat": "横ばい",
+        "unknown": "比較データ不足"
+    }.get(direction, "比較データ不足")
 
 
 def _format_weekday_profile_line(weekday_profile: Dict[int, Dict[str, str]]) -> str:
@@ -622,11 +625,11 @@ def _coverage_line(current: CoverageWindow, previous: CoverageWindow) -> str:
             return 0
 
     return (
-        "• カバレッジ: "
-        f"current raw {count(current, 'raw_days')}/{count(current, 'target_days')}, "
-        f"masked {count(current, 'masked_days')}, missing {count(current, 'missing_days')}; "
-        f"previous raw {count(previous, 'raw_days')}/{count(previous, 'target_days')}, "
-        f"masked {count(previous, 'masked_days')}, missing {count(previous, 'missing_days')}"
+        "• データ充足: "
+        f"今回 {count(current, 'observed_days')}/{count(current, 'target_days')}日 "
+        f"（今回取得 {count(current, 'raw_days')}日・履歴補完 {count(current, 'masked_days')}日・未取得 {count(current, 'missing_days')}日） / "
+        f"前期 {count(previous, 'observed_days')}/{count(previous, 'target_days')}日 "
+        f"（未取得 {count(previous, 'missing_days')}日）"
     )
 
 
@@ -639,12 +642,18 @@ def _build_summary_actions_block() -> Dict[str, Any]:
         "elements": [
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "history_masked.json"},
+                "text": {"type": "plain_text", "text": "カレンダーを開く"},
+                "url": os.getenv("TARGET_URL", "http://cheeks.nagoya/yoyaku.shtml"),
+                "style": "primary",
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "公開用の観測履歴を確認"},
                 "url": f"{base_url}/history_masked.json",
             },
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "summary_masked.json"},
+                "text": {"type": "plain_text", "text": "公開用の集計結果を確認"},
                 "url": f"{base_url}/summary_masked.json",
             },
         ],
@@ -682,8 +691,7 @@ def build_slack_payload(
     coverage_line = _coverage_line(context.coverage_current, context.coverage_previous)
     context_elements = [
         {"type": "mrkdwn", "text": f"対象期間: {_format_date_range(context.period_start, context.period_end)}"},
-        {"type": "mrkdwn", "text": "mode: public-safe approximation"},
-        {"type": "mrkdwn", "text": coverage_line.removeprefix("• ")},
+        {"type": "plain_text", "text": "人数・比率は帯域で表示する概算です。未取得日は0人として集計しません。単女=単独女性、女=女性、全=合計。"},
     ]
 
     slack_blocks: List[Dict[str, Any]] = [
@@ -696,7 +704,7 @@ def build_slack_payload(
                 {"type": "mrkdwn", "text": "*期間帯域*\n" + "\n".join(stats_lines)},
             ],
         },
-        {"type": "section", "text": {"type": "mrkdwn", "text": "*Top3 好条件日*\n" + "\n".join(top_lines)}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "*Top3 比率の高い観測日（概算）*\n" + "\n".join(top_lines)}},
         {"type": "section", "text": {"type": "mrkdwn", "text": trend_line}},
         {"type": "section", "text": {"type": "mrkdwn", "text": weekday_line}},
         {"type": "section", "text": {"type": "mrkdwn", "text": coverage_line}},
@@ -706,7 +714,7 @@ def build_slack_payload(
     fallback_lines = [
         full_title,
         f"期間: {_format_date_range(context.period_start, context.period_end)}",
-        "mode: public-safe approximation",
+        "public-safe approximation / 帯域に基づく概算。未取得日は0人として集計しません。",
         "",
         "【最新観測】",
         *latest_lines,
@@ -728,35 +736,39 @@ def build_slack_payload(
         ("Top3", top_lines),
         ("傾向・曜日・カバレッジ", [trend_line, weekday_line, coverage_line]),
     ]
-    return {"text": fallback_text, "blocks": slack_blocks}, fallback_text, step_sections
+    return {"text": fallback_text, "blocks": slack_blocks, "unfurl_links": False, "unfurl_media": False}, fallback_text, step_sections
 
 
 def build_placeholder_summary_payload(
     title: str,
     message: str,
+    *,
+    source_unavailable: bool = False,
 ) -> Tuple[Dict[str, Any], str, List[Tuple[str, List[str]]]]:
     title = _safe_display_text(title, fallback="Cheekschecker Summary", max_length=150)
     message = _safe_display_text(message, fallback="No data for this period / 集計対象なし")
-    fallback = f"{title} {message}".strip()
+    state_label = "未取得" if source_unavailable else "観測なし"
+    explanation = "取得に失敗したため、現在の状況は不明です。0人や条件未達を示すものではありません。" if source_unavailable else "集計できる観測データがありません。0人や条件未達を示すものではありません。"
+    fallback = f"{title} {message}\n{explanation}".strip()
     sections = [
-        ("最新観測", ["該当なし"]),
-        ("期間帯域", ["該当なし"]),
-        ("Top3/傾向/カバレッジ", [message]),
+        ("最新観測", [state_label]),
+        ("期間帯域", [state_label]),
+        ("Top3/傾向/カバレッジ", [message, explanation]),
     ]
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": title, "emoji": False}},
         {
             "type": "context",
             "elements": [
-                {"type": "mrkdwn", "text": "mode: public-safe approximation"},
+                {"type": "plain_text", "text": explanation},
                 {"type": "mrkdwn", "text": message},
             ],
         },
         {
             "type": "section",
             "fields": [
-                {"type": "mrkdwn", "text": "*最新観測*\n該当なし"},
-                {"type": "mrkdwn", "text": "*期間帯域*\n該当なし"},
+                {"type": "mrkdwn", "text": f"*最新観測*\n{state_label}"},
+                {"type": "mrkdwn", "text": f"*期間帯域*\n{state_label}"},
             ],
         },
         {"type": "section", "text": {"type": "mrkdwn", "text": "*Top3 / 傾向 / カバレッジ*\n" + message}},

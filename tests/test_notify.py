@@ -305,3 +305,69 @@ def test_process_notifications_filters_stale_previous_month_first_day(
     )
 
     assert captured == []
+
+
+def test_failed_delivery_keeps_state_and_retries_next_run(monkeypatch, tmp_path):
+    import requests
+
+    path = tmp_path / "monitor_state.json"
+    original = {"days": {}}
+    path.write_text(json.dumps(original), encoding="utf-8")
+    monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", path)
+    calls = []
+
+    def fail_post(*args, **kwargs):
+        calls.append(kwargs["json"])
+        raise requests.Timeout("timeout")
+
+    monkeypatch.setattr("src.notifications.requests.post", fail_post)
+    settings = make_settings(slack_webhook_url="https://hooks.slack.test/services/example")
+    entry = make_entry(3, 4)
+    with pytest.raises(RuntimeError, match="notification failed"):
+        process_notifications([entry], settings=settings, logical_today=entry.business_day, state=original)
+    assert original == {"days": {}}
+    assert json.loads(path.read_text()) == original
+    assert len(calls) == 1  # No ambiguous fallback re-send for monitor.
+
+    class Accepted:
+        def raise_for_status(self):
+            pass
+
+    def accept_post(*args, **kwargs):
+        calls.append(kwargs["json"])
+        assert json.loads(path.read_text()) == original  # Persist only after acceptance.
+        return Accepted()
+
+    monkeypatch.setattr("src.notifications.requests.post", accept_post)
+    process_notifications([entry], settings=settings, logical_today=entry.business_day, state=original)
+    assert len(calls) == 2
+    saved = json.loads(path.read_text())
+    assert saved["days"][entry.business_day.isoformat()]["stage"] == "initial"
+    assert saved["days"][entry.business_day.isoformat()]["last_notified_at"] is not None
+
+
+def test_missing_webhook_does_not_mark_pending_notification_as_delivered(monkeypatch, tmp_path):
+    path = tmp_path / "monitor_state.json"
+    monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", path)
+    entry = make_entry(3, 4)
+    with pytest.raises(RuntimeError, match="SLACK_WEBHOOK_URL is not set"):
+        process_notifications([entry], settings=make_settings(), logical_today=entry.business_day, state={"days": {}})
+    assert not path.exists()
+
+
+def test_initial_notification_has_one_day_entry_and_accessible_context(monkeypatch, tmp_path):
+    captured = []
+    monkeypatch.setattr("watch_cheeks.MONITOR_STATE_PATH", tmp_path / "monitor_state.json")
+    monkeypatch.setattr("watch_cheeks.notify_slack", lambda payload, settings, **kwargs: captured.append(payload))
+    entry = make_entry(3, 4)
+    process_notifications(
+        [entry], settings=make_settings(ping_channel=True), logical_today=entry.business_day,
+        state={"days": {}, "last_fetched_at": "2024-01-10T12:00:00+09:00"},
+    )
+    payload = captured[0]
+    assert payload["text"].count("今日: 1/10(水)") == 1
+    assert "新規で条件を満たした日" not in payload["text"]
+    assert "確認: 2024-01-10 12:00 JST" in payload["text"]
+    assert payload["blocks"][0]["type"] == "header"
+    assert "営業日: 2024-01-10" in json.dumps(payload["blocks"], ensure_ascii=False)
+    assert payload["unfurl_links"] is False
