@@ -1594,7 +1594,7 @@ def should_skip_by_http_headers(
         return False, {"etag": None, "last_modified": None}
 
 
-def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> None:
+def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None, external_tick: str | None = None) -> None:
     if not check_robots_allow(settings):
         LOGGER.warning("Fetch skipped due to robots.txt policy")
         append_step_summary(
@@ -1607,10 +1607,25 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
     now = datetime.now(tz=JST)
     logical_today = derive_business_day(now, settings.rollover_hours)
     state = load_state(logical_today)
+    try:
+        tick = datetime.fromisoformat(external_tick) if external_tick else None
+    except ValueError:
+        raise ValueError("External scheduler tick must be a timezone-aware ISO timestamp") from None
+    if tick is not None and (tick.tzinfo is None or tick > now + timedelta(seconds=30)):
+        raise ValueError("External scheduler tick must be a valid, non-future ISO timestamp")
+    previous_tick = _parse_state_datetime(state.get("last_external_tick"))
+    if tick is not None and previous_tick is not None and tick <= previous_tick:
+        append_step_summary(STEP_SUMMARY_TITLE_MONITOR, [("独立起動の重複省略", [
+            "この定期イベントは処理済みです。監視状態と通知は変更しません。",
+        ])], "独立起動の重複を省略")
+        return
     skip, header_info = should_skip_by_http_headers(settings, state)
     # Manual artifact requests need the source body even when HEAD matches.
     if skip and output_sanitized is None:
         LOGGER.info("Skipping fetch because headers indicate no change")
+        state["last_checked_at"] = now.isoformat()
+        if tick is not None:
+            state["last_external_tick"] = tick.isoformat()
         save_state(state)
         append_step_summary(
             STEP_SUMMARY_TITLE_MONITOR,
@@ -1688,6 +1703,9 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
     recovery_pending = bool(prior_warning["consecutive_runs"] and prior_warning["last_warned_at"])
     state.update(header_info)
     state["last_fetched_at"] = recovered_at.isoformat()
+    state["last_checked_at"] = recovered_at.isoformat()
+    if tick is not None:
+        state["last_external_tick"] = tick.isoformat()
     if not recovery_pending:
         _reset_warning_throttle(state, MONITOR_FETCH_FAILURE_WARNING_KEY)
     if output_sanitized:
@@ -1696,6 +1714,9 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
         LOGGER.info("Sanitized HTML written to %s", output_sanitized)
 
     log_parsing_snapshot(entries, logical_today)
+    # Persist the observation before announcing it. A later notification or
+    # Step Summary failure can then checkpoint a consistent public snapshot.
+    update_masked_history(entries, settings=settings)
     processed_state = process_notifications(entries, settings=settings, logical_today=logical_today, state=state)
     if recovery_pending:
         # Deliver ordinary changes first. Keep the warning pending in that
@@ -1716,7 +1737,6 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
             append_step_summary(STEP_SUMMARY_TITLE_MONITOR, recovery_sections, recovery_fallback)
             _reset_warning_throttle(processed_state, MONITOR_FETCH_FAILURE_WARNING_KEY)
             save_state(processed_state)
-    update_masked_history(entries, settings=settings)
 
 
 def summary(
@@ -1863,6 +1883,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     monitor_parser = subparsers.add_parser("monitor", help="Run monitoring notifications")
     monitor_parser.add_argument("--sanitized-output", type=Path, help="Path to save sanitized HTML")
+    monitor_parser.add_argument("--external-tick", help="ISO timestamp of the independent scheduler event")
 
     diagnostic_parser = subparsers.add_parser(
         "monitor-diagnostic",
@@ -1893,7 +1914,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     if args.command in {None, "monitor"}:
         sanitized_path = getattr(args, "sanitized_output", None)
-        monitor(settings, output_sanitized=sanitized_path)
+        monitor(settings, output_sanitized=sanitized_path, external_tick=getattr(args, "external_tick", None))
     elif args.command == "monitor-diagnostic":
         if args.scenario == "all":
             send_slack_diagnostic_suite(settings)

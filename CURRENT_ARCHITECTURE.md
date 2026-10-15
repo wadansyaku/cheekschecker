@@ -3,8 +3,11 @@
 この文書は 2026-10-15 時点の Cheekschecker のローカル実装契約をまとめたものです。本番反映・実Slackでの受信確認は別の検証です。
 
 ## 2026-10-15 の更新
+- 成功した更新確認は `last_checked_at`、本文の取得・解析は `last_fetched_at` で区別します。独立起動の `last_external_tick` は処理済みイベントの公開時刻マーカーです。旧stateはNoneとして読み込めます。
+- masked historyを通知より先に保存し、monitorの後続失敗でも公開データ検査後にcheckpointをcommitします。診断・実行前の失敗・キャンセルは対象外です。GitHubへの最終push失敗やSlack応答喪失のexactly-once保証は残りません。
+- `scheduler/worker.mjs` は独立した定期起動用の未設置Workerです。認証は対象repo限定のActions操作とContents読取だけを要求し、Slack Webhookを複製しません。既存GitHub cronも維持します。
 - 通常通知とsummary通知は送信失敗を実行失敗として伝えます。通常通知のstateは送信受付後に保存し、失敗時に入力stateを変更しません。Slack受付・Git保存・pushは独立した処理なので、受付後の保存失敗やpush失敗で重複する可能性は残ります。
-- 取得失敗の事実と警告の送信済み日時を区別します。警告送信失敗時やmanualのfail-fastでもローカルに取得失敗回数を残し、警告送信済み日時は進めません。workflow自体が失敗した場合は通常commit stepへ到達しないため、その失敗記録のリモート永続化は保証しません。
+- 取得失敗の事実と警告の送信済み日時を区別します。警告送信失敗時やmanualのfail-fastでもローカルに取得失敗回数を残し、警告送信済み日時は進めません。monitorの実行後の失敗はcheckpointの保存対象です。ローカル保存・検査・最終pushの失敗やキャンセルの場合はリモート永続化を保証しません。summary workflowの失敗時保存は別の境界です。
 - HEAD skipではETagを優先し、営業日変更・失敗からの復旧時は再取得します。validatorと取得成功時刻は解析成功後に確定します。解析できない空ページはsource-unavailable扱いです。
 - 公開保存のmaskラベルは既定の既知ラベルに限定します。top_daysの日付表示と曜日キーも既知形式だけを許可し、任意文字列による生値・名前の混入を防ぎます。
 - summary入力の欠測・非数・負数・人数の矛盾を観測0として扱いません。通常通知とsummaryの比率帯域は共有関数で下限閾値に従って分類します。

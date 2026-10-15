@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 
@@ -54,6 +55,12 @@ SUMMARY_CONTRACTS = {
 }
 
 NODE24_OPT_IN = "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'"
+MONITOR_CHECKPOINT_IF = (
+    '!cancelled() && !inputs.send_monitor_diagnostic && ('
+    'contains(fromJSON(\'["success","failure"]\'), steps.monitor_scheduled.outcome) || '
+    'contains(fromJSON(\'["success","failure"]\'), steps.monitor_manual.outcome) || '
+    'contains(fromJSON(\'["success","failure"]\'), steps.monitor_external.outcome))'
+)
 LEGACY_NODE20_ACTION_REFS = (
     "actions/checkout@v4",
     "actions/setup-python@v5",
@@ -254,7 +261,7 @@ def _validate_manual_artifact_contract(
         expected_if = "if: github.event_name == 'workflow_dispatch'"
         if path.name == "monitor.yml":
             expected_if = (
-                "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+                "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger"
             )
         if not _step_has_line(block, expected_if):
             errors.append(
@@ -278,19 +285,19 @@ def _validate_monitor_diagnostic_only_contract(
 
     guarded_steps = {
         "Run monitor with sanitized artifact": (
-            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger"
         ),
         "Upload sanitized table": (
-            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger"
         ),
         "Upload masked history snapshot": (
-            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger"
         ),
         "Upload monitor state snapshot": (
-            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger"
         ),
         "Commit public-safe monitor artifacts": (
-            "if: github.event_name != 'workflow_dispatch' || !inputs.send_monitor_diagnostic"
+            "if: " + json.dumps(MONITOR_CHECKPOINT_IF)
         ),
     }
     errors: list[str] = []
@@ -316,7 +323,7 @@ def _validate_allow_fetch_failure_contract(
         scheduled = _find_step_block(blocks, "Run monitor (scheduled)")
         manual = _find_step_block(blocks, "Run monitor with sanitized artifact")
         expected_manual_if = (
-            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic"
+            "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger"
         )
         if scheduled is None or not _step_has_line(scheduled[1], "if: github.event_name == 'schedule'"):
             errors.append(f"{path} scheduled monitor must be gated to github.event_name == 'schedule'")
@@ -326,6 +333,18 @@ def _validate_allow_fetch_failure_contract(
             errors.append(f"{path} manual monitor must be gated to workflow_dispatch")
         if manual is None or not _step_has_line(manual[1], "ALLOW_FETCH_FAILURE: '0'"):
             errors.append(f"{path} manual monitor must set ALLOW_FETCH_FAILURE: '0'")
+        external = _find_step_block(blocks, "Run monitor (independent scheduler)")
+        if external is None or not _step_has_line(external[1], "if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && inputs.external_trigger"):
+            errors.append(f"{path} independent scheduler monitor must be input gated")
+        if external is None or not _step_has_line(external[1], "ALLOW_FETCH_FAILURE: '1'"):
+            errors.append(f"{path} independent scheduler monitor must allow fetch failure")
+        for name, step_id in (("Run monitor (scheduled)", "monitor_scheduled"), ("Run monitor with sanitized artifact", "monitor_manual"), ("Run monitor (independent scheduler)", "monitor_external")):
+            found = _find_step_block(blocks, name)
+            if found is None or not _step_has_line(found[1], f"id: {step_id}"):
+                errors.append(f"{path} {name} must expose its outcome for checkpointing")
+        commit = _find_step_block(blocks, "Commit public-safe monitor artifacts")
+        if commit is None or not _step_has_line(commit[1], "python scripts/ci/check_public_artifacts.py"):
+            errors.append(f"{path} monitor checkpoint must validate public artifacts before commit")
     elif path.name in {"summary_weekly.yml", "summary_monthly.yml"}:
         collect = _find_step_block(blocks, "Collect ")
         expected = "ALLOW_FETCH_FAILURE: ${{ github.event_name == 'schedule' && '1' || '0' }}"

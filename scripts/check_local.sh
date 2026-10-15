@@ -19,3 +19,5 @@ fi
   --cov=scripts/ci \
   --cov-report=term-missing \
   --cov-fail-under=75
+
+node --test "$ROOT_DIR/scheduler/worker.test.mjs"

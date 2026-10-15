@@ -68,6 +68,8 @@ def default_monitor_state() -> Dict[str, Any]:
         "generated_at": None,
         "etag": None,
         "last_modified": None,
+        "last_checked_at": None,
+        "last_external_tick": None,
         "last_fetched_at": None,
         "warning_throttle": default_warning_throttle_state(),
         "days": {},
@@ -479,6 +481,8 @@ def load_monitor_state(
         "etag": raw.get("etag"),
         "last_modified": raw.get("last_modified"),
         "last_fetched_at": _coerce_iso_datetime_text(raw.get("last_fetched_at")),
+        "last_checked_at": _coerce_iso_datetime_text(raw.get("last_checked_at")),
+        "last_external_tick": _coerce_iso_datetime_text(raw.get("last_external_tick")),
         "warning_throttle": sanitize_warning_throttle(raw.get("warning_throttle")),
         "days": normalized_days,
     }
@@ -490,6 +494,8 @@ def save_monitor_state(state: Dict[str, Any], *, path: Path = MONITOR_STATE_PATH
         "etag": state.get("etag"),
         "last_modified": state.get("last_modified"),
         "last_fetched_at": _coerce_iso_datetime_text(state.get("last_fetched_at")),
+        "last_checked_at": _coerce_iso_datetime_text(state.get("last_checked_at")),
+        "last_external_tick": _coerce_iso_datetime_text(state.get("last_external_tick")),
         "warning_throttle": sanitize_warning_throttle(state.get("warning_throttle")),
         "days": {},
     }

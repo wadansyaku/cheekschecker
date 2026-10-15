@@ -1,6 +1,10 @@
+import json
 from pathlib import Path
 
-from scripts.ci.check_workflows import validate_public_safe_workflow_contract
+from scripts.ci.check_workflows import (
+    MONITOR_CHECKPOINT_IF,
+    validate_public_safe_workflow_contract,
+)
 
 
 def _notify_failure_step(
@@ -103,7 +107,7 @@ def _monitor_workflow_lines(
     missing_files: str = "error",
     retention: str = "3",
     scheduled_if: str = "github.event_name == 'schedule'",
-    manual_if: str = "github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic",
+    manual_if: str = "github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger",
 ) -> list[str]:
     return [
         "on:",
@@ -131,11 +135,13 @@ def _monitor_workflow_lines(
         "      - name: Sync public-safe artifacts",
         "        run: git pull --rebase --autostash origin main",
         "      - name: Run monitor (scheduled)",
+        "        id: monitor_scheduled",
         f"        if: {scheduled_if}",
         "        env:",
         "          ALLOW_FETCH_FAILURE: '1'",
         "        run: python watch_cheeks.py monitor",
         "      - name: Run monitor with sanitized artifact",
+        "        id: monitor_manual",
         f"        if: {manual_if}",
         "        env:",
         "          ALLOW_FETCH_FAILURE: '0'",
@@ -164,6 +170,12 @@ def _monitor_workflow_lines(
         "          path: monitor_state.json",
         f"          if-no-files-found: {missing_files}",
         "          retention-days: 3",
+        "      - name: Run monitor (independent scheduler)",
+        "        id: monitor_external",
+        "        if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && inputs.external_trigger",
+        "        env:",
+        "          ALLOW_FETCH_FAILURE: '1'",
+        "        run: python watch_cheeks.py monitor",
         "      - name: Send monitor Slack diagnostic",
         "        if: github.event_name == 'workflow_dispatch' && inputs.send_monitor_diagnostic",
         "        env:",
@@ -171,10 +183,11 @@ def _monitor_workflow_lines(
         "          PING_CHANNEL: '0'",
         "        run: python watch_cheeks.py monitor-diagnostic",
         "      - name: Commit public-safe monitor artifacts",
-        "        if: github.event_name != 'workflow_dispatch' || !inputs.send_monitor_diagnostic",
+        "        if: " + json.dumps(MONITOR_CHECKPOINT_IF),
         "        env:",
         "          WRITER_REF: ${{ github.ref_name }}",
         "        run: |",
+        "          python scripts/ci/check_public_artifacts.py",
         "          git add monitor_state.json history_masked.json",
         '          python scripts/ci/push_with_retry.py "$WRITER_REF"',
     ] + _notify_failure_step("Monitor Calendar")
@@ -223,6 +236,26 @@ def test_monitor_artifact_contract_accepts_expected_shape() -> None:
     )
 
     assert errors == []
+
+
+def test_monitor_checkpoint_requires_failure_path_and_public_validation():
+    lines = _monitor_workflow_lines()
+    errors = validate_public_safe_workflow_contract(Path("monitor.yml"), [
+        line.replace("!cancelled()", "success()") for line in lines
+    ])
+    assert any("must be skipped when send_monitor_diagnostic" in error for error in errors)
+    errors = validate_public_safe_workflow_contract(Path("monitor.yml"), [
+        line for line in lines if line.strip() != "python scripts/ci/check_public_artifacts.py"
+    ])
+    assert any("checkpoint must validate public artifacts" in error for error in errors)
+
+
+def test_independent_monitor_must_preserve_graceful_fetch_policy():
+    lines = _monitor_workflow_lines()
+    start = lines.index("      - name: Run monitor (independent scheduler)")
+    lines[start:] = [line.replace("ALLOW_FETCH_FAILURE: '1'", "ALLOW_FETCH_FAILURE: '0'") for line in lines[start:]]
+    errors = validate_public_safe_workflow_contract(Path("monitor.yml"), lines)
+    assert any("independent scheduler monitor must allow fetch failure" in error for error in errors)
 
 
 def test_monitor_manual_diagnostic_skips_normal_monitor_path() -> None:

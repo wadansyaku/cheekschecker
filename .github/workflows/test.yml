@@ -84,6 +84,14 @@ jobs:
             --cov-report=xml \
             --cov-fail-under=75
 
+      - name: Set up Node for independent scheduler tests
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Test independent scheduler
+        run: node --test scheduler/worker.test.mjs
+
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v7

@@ -18,6 +18,17 @@ on:
         options:
           - monitor
           - all
+          - failure-job
+      external_trigger:
+        description: 'Run regular monitoring without manual artifacts (independent scheduler)'
+        required: false
+        default: false
+        type: boolean
+      external_tick:
+        description: 'Independent scheduler event time (ISO, duplicate delivery guard)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -59,6 +70,12 @@ jobs:
       - name: Sync public-safe artifacts
         run: git pull --rebase --autostash origin ${{ github.ref_name }}
 
+      - name: Simulate failure notification diagnostic
+        if: github.event_name == 'workflow_dispatch' && inputs.send_monitor_diagnostic && inputs.diagnostic_scenario == 'failure-job'
+        run: |
+          echo "Intentional failure diagnostic. No calendar fetch or state update."
+          exit 1
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -96,6 +113,7 @@ jobs:
           command: python -m playwright install --with-deps chromium
 
       - name: Run monitor (scheduled)
+        id: monitor_scheduled
         if: github.event_name == 'schedule'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -103,14 +121,15 @@ jobs:
         run: python watch_cheeks.py monitor
 
       - name: Run monitor with sanitized artifact
-        if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic
+        id: monitor_manual
+        if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ALLOW_FETCH_FAILURE: '0'
         run: python watch_cheeks.py monitor --sanitized-output fetched_table_sanitized.html
 
       - name: Upload sanitized table
-        if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic
+        if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger
         uses: actions/upload-artifact@v7
         with:
           name: sanitized-table
@@ -119,7 +138,7 @@ jobs:
           retention-days: 3
 
       - name: Upload masked history snapshot
-        if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic
+        if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger
         uses: actions/upload-artifact@v7
         with:
           name: masked-history
@@ -128,13 +147,22 @@ jobs:
           retention-days: 3
 
       - name: Upload monitor state snapshot
-        if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic
+        if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && !inputs.external_trigger
         uses: actions/upload-artifact@v7
         with:
           name: monitor-state
           path: monitor_state.json
           if-no-files-found: error
           retention-days: 3
+
+      - name: Run monitor (independent scheduler)
+        id: monitor_external
+        if: github.event_name == 'workflow_dispatch' && !inputs.send_monitor_diagnostic && inputs.external_trigger
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALLOW_FETCH_FAILURE: '1'
+          MONITOR_EXTERNAL_TICK: ${{ inputs.external_tick }}
+        run: python watch_cheeks.py monitor --external-tick "$MONITOR_EXTERNAL_TICK"
 
       - name: Send monitor Slack diagnostic
         if: github.event_name == 'workflow_dispatch' && inputs.send_monitor_diagnostic
@@ -145,10 +173,11 @@ jobs:
         run: python watch_cheeks.py monitor-diagnostic
 
       - name: Commit public-safe monitor artifacts
-        if: github.event_name != 'workflow_dispatch' || !inputs.send_monitor_diagnostic
+        if: "!cancelled() && !inputs.send_monitor_diagnostic && (contains(fromJSON('[\"success\",\"failure\"]'), steps.monitor_scheduled.outcome) || contains(fromJSON('[\"success\",\"failure\"]'), steps.monitor_manual.outcome) || contains(fromJSON('[\"success\",\"failure\"]'), steps.monitor_external.outcome))"
         env:
           WRITER_REF: ${{ github.ref_name }}
         run: |
+          python scripts/ci/check_public_artifacts.py
           git config user.email "github-actions@github.com"
           git config user.name "github-actions"
           git pull --rebase --autostash origin ${{ github.ref_name }}
@@ -178,6 +207,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REF_NAME: ${{ github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
+          FAILURE_DIAGNOSTIC: ${{ inputs.send_monitor_diagnostic && inputs.diagnostic_scenario == 'failure-job' && '1' || '0' }}
         run: |
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             echo "SLACK_WEBHOOK_URL is not set; skipping failure notification"

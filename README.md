@@ -34,6 +34,9 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 - `.github/workflows/monitor.yml`：10分間隔の起動を予約していますが、GitHub Actionsの起動遅延・欠落により実際の確認間隔は長くなることがあります。通知内の確認時刻を基準にしてください。`monitor_state.json` と `history_masked.json` を更新し、writer jobで保存します。手動実行時はサニタイズ済みHTMLもArtifact化します。
 - `monitor.yml` の手動実行で `send_monitor_diagnostic=true` を指定すると、実予約データではないsynthetic payloadを正式Webhookへ送ります。`diagnostic_scenario=all` は通常通知・週次のデータ不足・取得失敗・観測なし・監視復旧の5状態、`monitor` は通常通知のみです。メンションを強制無効化し、通常monitor、Artifact upload、commitをスキップして監視stateを更新しません。Webhook未設定や送信失敗はjob failureです。
 - 通常の手動monitorは、更新ヘッダーが一致していても再取得し、要求されたsanitized artifactを生成します。scheduled monitorの取得省略は維持します。
+- `external_trigger=true` は独立した定期起動向けの通常監視です。artifactを作らず、取得失敗は警告とpending stateを保存します。`external_tick` の同一/過去イベントは重複処理しません。[独立起動Workerの設置手順](scheduler/README.md)は実装・検証済みですが、Cloudflareへの新規設置と専用認証は未実施です。
+- `send_monitor_diagnostic=true, diagnostic_scenario=failure-job` は意図的な失敗で実際のfailure jobを検証します。通常の監視stateを変更せず、Slackには「診断」と明示した障害通知だけを送ります。
+- monitorが実行された後の失敗でも、キャンセル時を除き公開データ検査を通ったcheckpointをcommitします。元の実行失敗は維持します。実行前の障害・診断ではcheckpointを作りません。
 - `.github/workflows/summary_weekly.yml`：週次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。手動実行時は「Cheekschecker: Webhook OK」で疎通確認後に本投稿を行います。
 - `.github/workflows/summary_monthly.yml`：月次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。週次と同じ writer transaction で commit / push します。
 - すべてのワークフローで `TZ=Asia/Tokyo`、`ROBOTS_ENFORCE=1` を設定し、robots.txt を尊重します。

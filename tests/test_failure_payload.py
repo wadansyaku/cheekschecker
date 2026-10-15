@@ -28,7 +28,8 @@ def test_build_payload_sanitizes_mrkdwn_and_drops_unsafe_run_url() -> None:
     assert "javascript:" not in text
     assert "&amp;" in text
     assert "&lt;tag&gt;" in text
-    assert all(block["type"] != "actions" for block in payload["blocks"])
+    assert "実行ログを確認" not in text
+    assert "カレンダーを開く" in text
 
 
 def test_build_payload_includes_valid_run_url_button() -> None:
@@ -63,4 +64,14 @@ def test_cli_writes_utf8_json_without_ascii_escaping(monkeypatch) -> None:
     assert "月次サマリー" in result.stdout
     assert "\\u6708" not in result.stdout
     parsed = json.loads(result.stdout)
-    assert parsed["text"].startswith("Workflow Failed:")
+    assert parsed["text"].startswith("Cheekschecker 処理に失敗しました:")
+
+
+def test_failure_diagnostic_is_explicit_and_never_mentions_channel():
+    payload = build_slack_failure_payload.build_payload({"FAILURE_DIAGNOSTIC": "1"})
+    rendered = _payload_text(payload)
+    assert "【診断】障害通知の動作確認" in rendered
+    assert "意図的に失敗させたテスト" in rendered
+    assert "監視状態の更新は行っていません" in rendered
+    assert "<!channel>" not in rendered
+    assert payload["unfurl_links"] is False

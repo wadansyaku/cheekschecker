@@ -822,3 +822,54 @@ def test_diagnostic_scenario_cli_is_bounded():
     assert parser.parse_args(["monitor-diagnostic", "--scenario", "all"]).scenario == "all"
     with pytest.raises(SystemExit):
         parser.parse_args(["monitor-diagnostic", "--scenario", "live"])
+
+
+def test_independent_tick_duplicate_and_older_events_leave_persisted_state_unchanged(monkeypatch, tmp_path):
+    settings, today = _prepare_outage_recovery(monkeypatch, tmp_path, warning_delivered=False)
+    calls = []
+
+    async def fetch(settings):
+        calls.append("fetch")
+        return "synthetic source", {}
+
+    monkeypatch.setattr(watch_cheeks, "fetch_calendar_html", fetch)
+    tick = (datetime.now(tz=watch_cheeks.JST) - timedelta(minutes=1)).isoformat()
+    monitor(settings, external_tick=tick)
+    path = tmp_path / "monitor_state.json"
+    accepted = path.read_bytes()
+    state = watch_cheeks.load_state(today)
+    assert state["last_checked_at"] == state["last_fetched_at"]
+    assert state["last_external_tick"] == tick
+    monitor(settings, external_tick=tick)
+    monitor(settings, external_tick=(datetime.fromisoformat(tick) - timedelta(minutes=10)).isoformat())
+    assert calls == ["fetch"]
+    assert path.read_bytes() == accepted
+
+
+@pytest.mark.parametrize("tick", ["invalid", "2026-10-15", "2026-10-15T12:00:00", "2099-01-01T00:00:00Z"])
+def test_independent_tick_rejects_invalid_naive_or_future_time_before_fetch(monkeypatch, tick):
+    monkeypatch.setattr(watch_cheeks, "check_robots_allow", lambda settings: True)
+    monkeypatch.setattr(watch_cheeks, "load_state", lambda day: {})
+    monkeypatch.setattr(watch_cheeks, "should_skip_by_http_headers", lambda *args: pytest.fail("invalid tick must not check source"))
+    with pytest.raises(ValueError, match="External scheduler tick"):
+        monitor(make_settings(), external_tick=tick)
+
+
+def test_post_delivery_summary_failure_keeps_a_consistent_checkpoint(monkeypatch, tmp_path):
+    settings, today = _prepare_outage_recovery(monkeypatch, tmp_path, warning_delivered=False, meets=True)
+    events = []
+
+    def append(title, sections, fallback):
+        if any(name == "通知結果" for name, _ in sections):
+            raise OSError("summary write failed")
+
+    monkeypatch.setattr(watch_cheeks, "update_masked_history", lambda *args, **kwargs: events.append("history"))
+    monkeypatch.setattr(watch_cheeks, "notify_slack", lambda *args, **kwargs: events.append("accepted"))
+    monkeypatch.setattr(watch_cheeks, "append_step_summary", append)
+    tick = (datetime.now(tz=watch_cheeks.JST) - timedelta(minutes=1)).isoformat()
+    with pytest.raises(OSError, match="summary write failed"):
+        monitor(settings, external_tick=tick)
+    assert events == ["history", "accepted"]
+    assert watch_cheeks.load_state(today)["days"][today.isoformat()]["stage"] == "initial"
+    monitor(settings, external_tick=tick)
+    assert events == ["history", "accepted"]

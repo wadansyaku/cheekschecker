@@ -85,6 +85,8 @@ def validate_public_artifacts(paths: tuple[Path, ...] = PUBLIC_ARTIFACTS) -> lis
                 "etag",
                 "last_modified",
                 "last_fetched_at",
+                "last_checked_at",
+                "last_external_tick",
                 "warning_throttle",
                 "days",
             }

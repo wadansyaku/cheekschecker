@@ -6,9 +6,9 @@ import os
 import re
 import sys
 import unicodedata
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 from urllib.parse import urlparse
-
 
 FIELD_TEXT_MAX = 180
 TOP_TEXT_MAX = 1000
@@ -35,7 +35,9 @@ def _truncate(text: str, max_length: int) -> str:
 
 
 def _escape_mrkdwn(value: str | None, *, fallback: str) -> str:
-    text = _clean_text(value, fallback=fallback).replace("@", "\uff20").replace("`", "'")
+    text = (
+        _clean_text(value, fallback=fallback).replace("@", "\uff20").replace("`", "'")
+    )
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return _truncate(text, FIELD_TEXT_MAX)
 
@@ -55,21 +57,32 @@ def build_payload(env: Mapping[str, str] | None = None) -> dict[str, Any]:
     ref_name = _escape_mrkdwn(source.get("REF_NAME"), fallback="unknown")
     event_name = _escape_mrkdwn(source.get("EVENT_NAME"), fallback="unknown")
     run_url = _valid_run_url(source.get("RUN_URL"))
+    diagnostic = source.get("FAILURE_DIAGNOSTIC") == "1"
 
-    text = _truncate(f"Workflow Failed: {workflow} ({event_name})", TOP_TEXT_MAX)
+    title = (
+        "【診断】障害通知の動作確認"
+        if diagnostic
+        else "Cheekschecker 処理に失敗しました"
+    )
+    guidance = (
+        "意図的に失敗させたテストです。実カレンダーの取得や監視状態の更新は行っていません。"
+        if diagnostic
+        else "通知の最新確認時刻をご確認ください。急ぐ場合はカレンダーを直接確認し、実行ログで原因を確認してください。"
+    )
+    text = _truncate(f"{title}: {workflow} ({event_name})\n{guidance}", TOP_TEXT_MAX)
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "Workflow Failed", "emoji": False},
+            "text": {"type": "plain_text", "text": title, "emoji": False},
         },
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    f"*Workflow:* {workflow}\n"
-                    f"*Branch:* `{ref_name}`\n"
-                    f"*Trigger:* {event_name}"
+                    f"{guidance}\n*処理:* {workflow}\n"
+                    f"*ブランチ:* `{ref_name}`\n"
+                    f"*起動方法:* {event_name}"
                 ),
             },
         },
@@ -82,14 +95,31 @@ def build_payload(env: Mapping[str, str] | None = None) -> dict[str, Any]:
                 "elements": [
                     {
                         "type": "button",
-                        "text": {"type": "plain_text", "text": "View Logs"},
+                        "text": {"type": "plain_text", "text": "実行ログを確認"},
                         "url": run_url,
                     }
                 ],
             }
         )
 
-    return {"text": text, "blocks": blocks}
+    blocks.append(
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "カレンダーを開く"},
+                    "url": "http://cheeks.nagoya/yoyaku.shtml",
+                }
+            ],
+        }
+    )
+    return {
+        "text": text,
+        "blocks": blocks,
+        "unfurl_links": False,
+        "unfurl_media": False,
+    }
 
 
 def main() -> int:

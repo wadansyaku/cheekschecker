@@ -4,6 +4,16 @@
 
 ## 2026-10-15 本番反映と受け入れ結果
 
+### 残課題の追加調査と実装
+
+最新のmonitor専用API100件にはscheduled 97件とmanual 3件があり、scheduledの作成間隔は中央値298.79分、最大585.82分、96区間すべてが30分超でした（2026-09-25 20:43〜10-15 14:49 JST）。全件success、runの記録上の所要時間は中央値41秒、最大395秒です。最新runと最大間隔のrunのjob開始も作成から数秒でした。長い空白は監視コードの実行時間ではなくrun作成間隔であり、定期イベントの生成・配信段階が主な調査対象です。GitHub内部の原因までは断定しません。
+
+- 本文取得時刻とは別に成功確認時刻を保存し、`report_monitor_health.py` で履歴上の起動間隔・現在の確認鮮度・本文の鮮度を別々に解析します。欠測・未来時刻はunknownです。
+- 取得失敗記録や送信受付済みマーカーが後続の失敗でrunnerごと失われないよう、実行済みmonitorのcheckpointを公開データ検査後にcommitします。失敗判定自体は維持します。観測履歴は通知前に保存します。
+- 実際のfailure jobを意図的に発火させる診断モードを用意し、通知を日本語化します。診断は通常stateを変更しません。
+- [独立起動Worker](scheduler/README.md)を実装しました。新規Cloudflare設置と対象repo限定のGitHub認証は未承認・未実施であり、GitHub cronの長期間隔が解消したとは扱いません。
+- スマートフォン実機・OS通知・既読・受信者の理解、GitHubへの最終push失敗やSlack応答喪失時の完全な重複防止は引き続き別の受け入れ条件です。
+
 ユーザーの明示承認に基づき、最新の公開state履歴を保持してmainへpushしました。実装コミットは [43c09fe](https://github.com/wadansyaku/cheekschecker/commit/43c09fed49c653f59003824cdc6da48d8c3f8307)、手動artifact生成の追加修正は [62ba2c4](https://github.com/wadansyaku/cheekschecker/commit/62ba2c4e7e93b5e37cd0ea1be9db3367864aa0cc) です。
 
 - [本番CI](https://github.com/wadansyaku/cheekschecker/actions/runs/38690201110): 213 tests成功、source coverage 84.16%、mypy・workflow・public artifact検査成功。既存のlint/整形指摘は今回一括修正していません。
@@ -37,7 +47,7 @@
 ### 次段階の優先順位
 
 1. **監視起動の信頼性**: main反映・CI・正式Webhook5状態・本番monitorのwriter実run確認は完了。scheduled起動の遅延・欠落を優先調査し、GitHub基盤障害を含むfailure通知の検証と、必要なら起動基盤の選択を別途進める。
-2. **配送と保存の独立障害**: Slack受付後のローカル保存・push失敗では重複が残る。workflow失敗時はローカルの取得失敗記録もリモートcommitされない。将来は公開安全なpending stateとwriterの失敗時保存方針を設計し、受付応答が失われた場合も含めた復旧契約を定める。現時点でexactly-onceを保証しない。
+2. **配送と保存の最終境界**: monitorの実行後失敗に対するcheckpointと、一時push障害の再試行は実装済み。Slack受付後のローカル保存失敗・GitHubへの最終push失敗・受付応答喪失では重複が残り得る。summaryの失敗時保存も別途検討する。現時点でexactly-onceを保証しない。
 3. **MASK_LEVEL=2のsummary補完**: 既定level2ラベルは保存できるが、summary補完はlevel1帯域だけ逆変換するため欠測になる。scheduledのlevel1は維持し、別途level2の統計表現と比較可能性を決めて回帰検証する。
 4. **設定・保守の整理**: 任意カスタムラベルは公開保存不可になった。必要なら設定読込時の明示的な検証を追加する。既存のlint/整形指摘と依存更新は、本変更と分けて互換性を確認しながら整備する。
 
