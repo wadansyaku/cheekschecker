@@ -46,7 +46,8 @@ def make_settings(**overrides) -> Settings:
     return replace(base, **overrides) if overrides else base
 
 
-def test_monitor_writes_nested_sanitized_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("header_skip", [False, True])
+def test_monitor_writes_nested_sanitized_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, header_skip: bool) -> None:
     async def fake_fetch_calendar_html(settings):
         return "<html></html>", {}
 
@@ -54,7 +55,7 @@ def test_monitor_writes_nested_sanitized_output(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr("watch_cheeks.fetch_calendar_html", fake_fetch_calendar_html)
     monkeypatch.setattr("watch_cheeks.load_state", lambda logical_today: {})
     monkeypatch.setattr(
-        "watch_cheeks.should_skip_by_http_headers", lambda settings, state: (False, {})
+        "watch_cheeks.should_skip_by_http_headers", lambda settings, state: (header_skip, {})
     )
     monkeypatch.setattr(
         "watch_cheeks.parse_day_entries", lambda html, settings, reference_date: [watch_cheeks._build_monitor_diagnostic_entry(reference_date)]

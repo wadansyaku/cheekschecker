@@ -33,6 +33,7 @@ Cheekschecker は公開カレンダーを巡回し、女性参加が濃い営業
 ## GitHub Actions の構成
 - `.github/workflows/monitor.yml`：10分間隔の起動を予約していますが、GitHub Actionsの起動遅延・欠落により実際の確認間隔は長くなることがあります。通知内の確認時刻を基準にしてください。`monitor_state.json` と `history_masked.json` を更新し、writer jobで保存します。手動実行時はサニタイズ済みHTMLもArtifact化します。
 - `monitor.yml` の手動実行で `send_monitor_diagnostic=true` を指定すると、実予約データではないsynthetic payloadを正式Webhookへ送ります。`diagnostic_scenario=all` は通常通知・週次のデータ不足・取得失敗・観測なし・監視復旧の5状態、`monitor` は通常通知のみです。メンションを強制無効化し、通常monitor、Artifact upload、commitをスキップして監視stateを更新しません。Webhook未設定や送信失敗はjob failureです。
+- 通常の手動monitorは、更新ヘッダーが一致していても再取得し、要求されたsanitized artifactを生成します。scheduled monitorの取得省略は維持します。
 - `.github/workflows/summary_weekly.yml`：週次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。手動実行時は「Cheekschecker: Webhook OK」で疎通確認後に本投稿を行います。
 - `.github/workflows/summary_monthly.yml`：月次サマリーを作成し、Slack へ投稿、`history_masked.json` と `summary_masked.json` を更新します。週次と同じ writer transaction で commit / push します。
 - すべてのワークフローで `TZ=Asia/Tokyo`、`ROBOTS_ENFORCE=1` を設定し、robots.txt を尊重します。

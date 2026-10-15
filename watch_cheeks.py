@@ -1608,7 +1608,8 @@ def monitor(settings: Settings, *, output_sanitized: Optional[Path] = None) -> N
     logical_today = derive_business_day(now, settings.rollover_hours)
     state = load_state(logical_today)
     skip, header_info = should_skip_by_http_headers(settings, state)
-    if skip:
+    # Manual artifact requests need the source body even when HEAD matches.
+    if skip and output_sanitized is None:
         LOGGER.info("Skipping fetch because headers indicate no change")
         save_state(state)
         append_step_summary(
