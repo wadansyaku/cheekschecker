@@ -929,13 +929,18 @@
       "last_notified_at": null,
       "met": false,
       "stage": "none"
+    },
+    "2026-10-24": {
+      "last_notified_at": null,
+      "met": false,
+      "stage": "none"
     }
   },
   "etag": null,
-  "generated_at": "2026-10-23T05:32:28.714092+09:00",
-  "last_checked_at": "2026-10-23T05:32:28.710842+09:00",
+  "generated_at": "2026-10-23T08:34:22.240952+09:00",
+  "last_checked_at": "2026-10-23T08:34:22.237766+09:00",
   "last_external_tick": "2026-10-15T15:54:13.347000+09:00",
-  "last_fetched_at": "2026-10-23T05:32:28.710842+09:00",
+  "last_fetched_at": "2026-10-23T08:34:22.237766+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
