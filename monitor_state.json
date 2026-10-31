@@ -976,16 +976,16 @@
       "stage": "none"
     },
     "2026-11-02": {
-      "last_notified_at": 1793468917,
+      "last_notified_at": 1793479819,
       "met": true,
-      "stage": "initial"
+      "stage": "bonus"
     }
   },
   "etag": null,
-  "generated_at": "2026-11-01T02:48:37.494834+09:00",
-  "last_checked_at": "2026-11-01T02:48:37.343979+09:00",
+  "generated_at": "2026-11-01T05:50:20.169917+09:00",
+  "last_checked_at": "2026-11-01T05:50:19.992631+09:00",
   "last_external_tick": "2026-10-15T15:54:13.347000+09:00",
-  "last_fetched_at": "2026-11-01T02:48:37.343979+09:00",
+  "last_fetched_at": "2026-11-01T05:50:19.992631+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
