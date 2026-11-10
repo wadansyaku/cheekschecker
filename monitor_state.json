@@ -1027,10 +1027,10 @@
     }
   },
   "etag": null,
-  "generated_at": "2026-11-10T16:38:16.498540+09:00",
-  "last_checked_at": "2026-11-10T16:38:16.493819+09:00",
+  "generated_at": "2026-11-11T00:48:28.387746+09:00",
+  "last_checked_at": "2026-11-11T00:48:28.382732+09:00",
   "last_external_tick": "2026-10-15T15:54:13.347000+09:00",
-  "last_fetched_at": "2026-11-10T16:38:16.493819+09:00",
+  "last_fetched_at": "2026-11-11T00:48:28.382732+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
