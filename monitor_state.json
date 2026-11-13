@@ -1039,13 +1039,18 @@
       "last_notified_at": null,
       "met": false,
       "stage": "none"
+    },
+    "2026-11-15": {
+      "last_notified_at": null,
+      "met": false,
+      "stage": "none"
     }
   },
   "etag": null,
-  "generated_at": "2026-11-14T00:39:46.078024+09:00",
-  "last_checked_at": "2026-11-14T00:39:46.072022+09:00",
+  "generated_at": "2026-11-14T06:39:57.811561+09:00",
+  "last_checked_at": "2026-11-14T06:39:57.808272+09:00",
   "last_external_tick": "2026-10-15T15:54:13.347000+09:00",
-  "last_fetched_at": "2026-11-14T00:39:46.072022+09:00",
+  "last_fetched_at": "2026-11-14T06:39:57.808272+09:00",
   "last_modified": null,
   "warning_throttle": {
     "monitor_fetch_failure": {
